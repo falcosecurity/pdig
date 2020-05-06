@@ -30,7 +30,7 @@
 
 int cprintf(const char* format, ...);
 
-#ifdef DEBUG
+#ifdef _DEBUG
 #define ASSERT(X) if(!(X)) { \
 	cprintf("%s:%d ASSERTION FAILED: "#X"\n", __FILE__, __LINE__); \
 	asm("int3;"); \

@@ -50,7 +50,11 @@ extern "C" {
 	} \
 } while(0)
 
+#ifdef _DEBUG
 #define DEBUG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define DEBUG(...)
+#endif
 
 #define WARN(fmt, ...) fprintf(stderr, fmt " at %s:%d (errno %s)\n", __VA_ARGS__, __FILE__, __LINE__, strerror(errno))
 
