@@ -249,7 +249,7 @@ int main(int argc, char **argv)
 			EXPECT(raise(SIGSTOP));
 			install_filter();
 			DEBUG("child calling execve\n");
-			execv(argv[1], argv+1);
+			execvp(argv[1], argv+1);
 			DEBUG("child execve failed\n");
 			abort();
 		case -1: /* error */

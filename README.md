@@ -27,9 +27,9 @@ This means you cannot use the high-performance in-kernel tracing, but with pdig 
 
 ## How to run it?
 
-Run `pdig` with the full path (and arguments, if any) of the process you want to trace, similar to `strace(1)`, e.g.
+Run `pdig` with the path (and arguments, if any) of the process you want to trace, similar to `strace(1)`, e.g.
 
-    pdig /usr/bin/curl https://example.com/
+    pdig curl https://example.com/
 
 To observe any effect, you will need e.g. falco or sysdig running in a separate process, with udig (userspace instrumentation) enabled. For example:
 
