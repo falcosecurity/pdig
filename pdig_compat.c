@@ -124,18 +124,45 @@ static __inline__ int ud_clock_gettime(clockid_t clk_id, struct timespec *tp)
 	return syscall(__NR_clock_gettime, clk_id, tp);
 }
 
+static inline void* page_align(void* ptr)
+{
+	uintptr_t aligned = ((uintptr_t)ptr & ~(PAGE_SIZE - 1));
+	return (void*)aligned;
+}
+
+static inline void* next_page(void* ptr)
+{
+	uintptr_t aligned = ((uintptr_t)ptr & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
+	return (void*)aligned;
+}
+
 unsigned long ppm_copy_from_user_impl(pid_t pid, void* to, void* from, unsigned long n)
 {
 	struct iovec local_iov[] = {{
 		.iov_base = to,
 		.iov_len = n,
 	}};
-	// TODO: split into page-sized/aligned chunks
-	struct iovec remote_iov[] = {{
-		.iov_base = from,
-		.iov_len = n,
-	}};
-	int ret = n - process_vm_readv(pid, local_iov, 1, remote_iov, 1, 0);
+
+	int first_page = ((uintptr_t)from) / PAGE_SIZE;
+	int last_page = ((uintptr_t)from + n) / PAGE_SIZE;
+	int npages = last_page - first_page + 1;
+
+	struct iovec remote_iov[npages];
+	void *ptr = from;
+	unsigned long to_read = n;
+
+	for(int p = 0; p < npages; ++p)
+	{
+		void* next_ptr = next_page(ptr);
+
+		unsigned long chunk = MIN(to_read, next_ptr - ptr);
+		remote_iov[p].iov_base = ptr;
+		remote_iov[p].iov_len = chunk;
+
+		to_read -= chunk;
+		ptr = next_ptr;
+	}
+	int ret = n - process_vm_readv(pid, local_iov, 1, remote_iov, npages, 0);
 	return ret;
 }
 
