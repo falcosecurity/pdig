@@ -19,6 +19,7 @@
 #include <sys/uio.h>
 #include <limits.h>
 #include <syscall.h>
+#include <getopt.h>
 
 #include <unordered_map>
 
@@ -166,9 +167,14 @@ int get_pid(pid_t tid)
 #define X32_SYSCALL_BIT 0x40000000
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
-static int install_filter()
+static int install_filter(bool capture_all)
 {
 	size_t num_syscalls = 0;
+	uint32_t filtered_flags = EF_UNUSED;
+
+	if(!capture_all) {
+		filtered_flags |= EF_DROP_SIMPLE_CONS;
+	}
 
 	uint32_t instrumented_syscalls[SYSCALL_TABLE_SIZE] = {0};
 
@@ -180,13 +186,13 @@ static int install_filter()
 
 		enum ppm_event_type enter_event = g_syscall_table[i].enter_event_type;
 		uint32_t enter_event_flags = g_event_info[enter_event].flags;
-		if (enter_event_flags & (EF_UNUSED | EF_DROP_SIMPLE_CONS)) {
+		if ((enter_event_flags & filtered_flags) != 0) {
 			continue;
 		}
 
 		enum ppm_event_type exit_event = g_syscall_table[i].exit_event_type;
 		uint32_t exit_event_flags = g_event_info[exit_event].flags;
-		if (exit_event_flags & (EF_UNUSED | EF_DROP_SIMPLE_CONS)) {
+		if ((exit_event_flags & filtered_flags) != 0) {
 			continue;
 		}
 
@@ -234,11 +240,44 @@ static int install_filter()
 	return 0;
 }
 
+static void usage()
+{
+    printf(
+"Usage: pdig [options] comdline\n\n"
+"Options:\n"
+" -a, --capture_all  capture all of the system calls and not only the ones used by falco.\n"
+" -h, --help         Print this page\n"
+);
+}
+
 int main(int argc, char **argv)
 {
+	int exitcode = 0;
+	bool capture_all = false;
+	int op;
+	int long_index = 0;
+
+	static struct option long_options[] =
+	{
+		{"capture_all", no_argument, 0, 'a' },
+		{"help", no_argument, 0, 'h' }
+	};
+
+	while((op = getopt_long(argc, argv, "ah", long_options, &long_index)) != -1) {
+		switch(op) {
+		case 'a':
+			capture_all = true;
+			break;
+		case 'h':
+			usage();
+			return exitcode;
+		default:
+			break;
+		}
+	}
+
 	pid_t pid = fork();
 	pid_t mainpid = pid;
-	int exitcode = 0;
 	switch(pid) {
 		case 0: /* child */
 			DEBUG("child forked, pid = %d\n", getpid());
@@ -247,9 +286,9 @@ int main(int argc, char **argv)
 			EXPECT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
 			DEBUG("NO_NEW_PRIVS done\n");
 			EXPECT(raise(SIGSTOP));
-			install_filter();
+			install_filter(capture_all);
 			DEBUG("child calling execve\n");
-			execvp(argv[1], argv+1);
+			execvp(argv[optind], argv+optind);
 			DEBUG("child execve failed\n");
 			abort();
 		case -1: /* error */
