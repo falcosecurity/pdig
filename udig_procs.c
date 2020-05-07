@@ -22,7 +22,6 @@
 #include <poll.h>
 #include <sys/sem.h>
 #include <sys/file.h>
-#include <sys/quota.h>
 #include <sys/ptrace.h>
 
 #include "udig_capture.h"

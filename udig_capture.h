@@ -1,3 +1,4 @@
+#include <linux/quota.h>
 #include <sys/resource.h>
 #include <sys/user.h>
 #include <sys/types.h>
@@ -87,25 +88,6 @@ int udig_getpeername(int fd, struct sockaddr *sock_address, socklen_t *alen);
 #define EFAULT 14
 
 #define SOL_TCP 6
-
-struct if_dqblk {
-	__u64 dqb_bhardlimit;
-	__u64 dqb_bsoftlimit;
-	__u64 dqb_curspace;
-	__u64 dqb_ihardlimit;
-	__u64 dqb_isoftlimit;
-	__u64 dqb_curinodes;
-	__u64 dqb_btime;
-	__u64 dqb_itime;
-	__u32 dqb_valid;
-};
-
-struct if_dqinfo {
-	__u64 dqi_bgrace;
-	__u64 dqi_igrace;
-	__u32 dqi_flags;
-	__u32 dqi_valid;
-};
 
 unsigned long ppm_copy_from_user(void *to, const void __user *from, unsigned long n);
 long ppm_strncpy_from_user(char *to, const char __user *from, unsigned long n);
