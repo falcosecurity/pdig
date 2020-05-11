@@ -22,15 +22,17 @@
 #include <limits.h>
 #include <syscall.h>
 
+#include <atomic>
 #include <unordered_map>
 
 
 struct pdig_process_context {
-	pdig_process_context() : saw_initial_sigstop(false), clone_flags(0), parent_clone_flags(0), pid(0) {}
+	pdig_process_context() : saw_initial_sigstop(false), syscall_enter(true), clone_flags(0), parent_clone_flags(0), pid(0) {}
 	pdig_process_context(const pdig_process_context&) = delete;
 	pdig_process_context& operator= (const pdig_process_context&) = delete;
 
 	bool saw_initial_sigstop;
+	bool syscall_enter;
 	uint64_t clone_flags; // clone() flags this thread was created with
 	uint64_t parent_clone_flags; // clone() flags when this thread is a parent
 	pid_t pid; // we know the tid but need to store the pid somewhere
@@ -311,7 +313,7 @@ static int step(pid_t target)
 	return 0;
 }
 
-static int attach(pid_t target, bool capture_all)
+static int attach(pid_t target, bool use_seccomp, bool capture_all)
 {
 	struct sock_fprog* prog = build_filter(capture_all);
 	struct user_regs_struct saved_regs;
@@ -319,7 +321,15 @@ static int attach(pid_t target, bool capture_all)
 	set_pid(target);
 	EXPECT(ptrace(PTRACE_ATTACH, target, NULL, NULL));
 	EXPECT(waitpid(target, 0, WUNTRACED));
+	if(!use_seccomp) {
+		EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT)));
+
+		EXPECT(ptrace(PTRACE_SYSCALL, target, NULL, NULL));
+		return 0;
+	}
+
 	EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESECCOMP)));
+
 	EXPECT(ptrace(PTRACE_GETREGS, target, &saved_regs, &saved_regs));
 
 	DEBUG("original rip = %016llx\n", saved_regs.rip);
@@ -406,10 +416,23 @@ static void usage()
 	printf(
 "Usage: pdig [options] comdline\n\n"
 "Options:\n"
-" -a, --capture-all  capture all of the system calls and not only the ones used by falco.\n"
-" -p PID, --pid PID  attach to an already running process.\n"
-" -h, --help         Print this page\n"
+" -a, --capture-all   capture all of the system calls and not only the ones used by falco.\n"
+" -p PID, --pid PID   attach to an already running process.\n"
+" -S, --force_seccomp enable seccomp even for attaching to running processes.\n"
+"                     Note: this will improve performance but will kill the traced process when pdig exits.\n"
+" -h, --help          Print this page\n"
 );
+}
+
+static std::atomic<bool> die(false);
+
+void sigint(int _sig)
+{
+	if(!die) {
+		die = true;
+	} else {
+		exit(1);
+	}
 }
 
 int main(int argc, char **argv)
@@ -417,23 +440,29 @@ int main(int argc, char **argv)
 	pid_t pid = -1;
 	int exitcode = 0;
 	bool capture_all = false;
+	bool force_seccomp = false;
 	int op;
 	int long_index = 0;
+	__ptrace_request ptrace_default_op = PTRACE_CONT;
 
 	static struct option long_options[] =
 	{
 		{"capture-all", no_argument, 0, 'a' },
 		{"pid", required_argument, 0, 'p' },
+		{"force-seccomp", no_argument, 0, 'S' },
 		{"help", no_argument, 0, 'h' }
 	};
 
-	while((op = getopt_long(argc, argv, "ap:h", long_options, &long_index)) != -1) {
+	while((op = getopt_long(argc, argv, "ap:Sh", long_options, &long_index)) != -1) {
 		switch(op) {
 			case 'a':
 				capture_all = true;
 				break;
 			case 'p':
 				pid = atoi(optarg);
+				break;
+			case 'S':
+				force_seccomp = true;
 				break;
 			case 'h':
 				usage();
@@ -443,9 +472,15 @@ int main(int argc, char **argv)
 		}
 	}
 
+	signal(SIGCHLD, ignore_sig);
+	signal(SIGINT, sigint);
+
 	if(pid != -1)
 	{
-		EXPECT(attach(pid, capture_all));
+		EXPECT(attach(pid, force_seccomp, capture_all));
+		if(!force_seccomp) {
+			ptrace_default_op = PTRACE_SYSCALL;
+		}
 	}
 	else
 	{
@@ -456,9 +491,8 @@ int main(int argc, char **argv)
 
 	EXPECT(pdig_init_shm());
 	DEBUG("parent pid = %d\n", getpid());
-	signal(SIGCHLD, ignore_sig);
 
-	while(1) {
+	do {
 		int status;
 		DEBUG("parent calling waitpid()\n");
 		pid = waitpid(-1, &status, WUNTRACED);
@@ -483,7 +517,7 @@ int main(int argc, char **argv)
 			}
 			procs.erase(pid);
 		} else if(WIFSTOPPED(status)) {
-			__ptrace_request ptrace_op = PTRACE_CONT;
+			__ptrace_request ptrace_op = ptrace_default_op;
 			int sig = status >> 8;
 			pdig_process_context& pctx = procs[pid];
 			DEBUG("waitpid(-1) = %d, status = %04x, errno = %d\n", pid, status, errno);
@@ -503,6 +537,7 @@ int main(int argc, char **argv)
 				case SIGTRAP | (PTRACE_EVENT_SECCOMP << 8):
 					DEBUG("seccomp, tid = %d, pid = %d\n", pid, pctx.pid);
 					handle_syscall(pid, pctx, true);
+					pctx.syscall_enter = false;
 					ptrace_op = PTRACE_SYSCALL; // trap the exit event
 					sig = 0;
 					break;
@@ -528,7 +563,18 @@ int main(int argc, char **argv)
 					break;
 				case SIGTRAP | 0x80:
 					sig = 0;
-					handle_syscall(pid, pctx, false);
+					handle_syscall(pid, pctx, pctx.syscall_enter);
+					pctx.syscall_enter = !pctx.syscall_enter;
+					if(die && ptrace_default_op == PTRACE_SYSCALL) {
+						if(pctx.syscall_enter) {
+							fprintf(stderr, "detaching from pid %d\n", pid);
+							EXPECT(ptrace(PTRACE_DETACH, pid, 0, 0));
+							procs.erase(pid);
+							continue;
+						} else {
+							fprintf(stderr, "pid %d in the middle of a syscall, not detaching yet\n", pid);
+						}
+					}
 					break;
 				default:
 					if((sig & 0x3f) == SIGTRAP) {
@@ -543,7 +589,7 @@ int main(int argc, char **argv)
 		} else {
 			DEBUG("pid=%d unhandled status = %08x\n", pid, status);
 		}
-	}
+	} while(!procs.empty());
 
 	return exitcode;
 }

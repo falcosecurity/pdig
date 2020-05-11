@@ -58,3 +58,5 @@ With the caveat that there are lies, damn lies and benchmarks, here are some res
 
 i.e. the worst case for OSBench is roughly 1/4 the original performance for system call heavy workloads.
 
+**Note**: When attaching to an already running process with `-p`, `pdig` will not use the seccomp filter by default.
+You can force it with the `-S` option, but remember that a seccomp filter cannot be removed, so killing `pdig` will also kill the traced processes.
