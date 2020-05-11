@@ -29,7 +29,13 @@ This means you cannot use the high-performance in-kernel tracing, but with pdig 
 
 Run `pdig` with the path (and arguments, if any) of the process you want to trace, similar to `strace(1)`, e.g.
 
-    pdig curl https://example.com/
+    pdig [-a] curl https://example.com/
+
+The `-a` option enables the full filter, which provides a richer set of instrumented system calls. You probably want to use this option with sysdig, but not with falco.
+
+You can also attach to a running process with the `-p` option:
+
+    pdig [-a] -p 1234
 
 To observe any effect, you will need e.g. falco or sysdig running in a separate process, with udig (userspace instrumentation) enabled. For example:
 

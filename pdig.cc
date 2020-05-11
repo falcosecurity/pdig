@@ -1,6 +1,7 @@
 #define __USE_GNU
 
 #include <errno.h>
+#include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,6 +13,7 @@
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
@@ -19,7 +21,6 @@
 #include <sys/uio.h>
 #include <limits.h>
 #include <syscall.h>
-#include <getopt.h>
 
 #include <unordered_map>
 
@@ -167,11 +168,10 @@ int get_pid(pid_t tid)
 #define X32_SYSCALL_BIT 0x40000000
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
-static int install_filter(bool capture_all)
+static struct sock_fprog* build_filter(bool capture_all)
 {
 	size_t num_syscalls = 0;
 	uint32_t filtered_flags = EF_UNUSED;
-
 	if(!capture_all) {
 		filtered_flags |= EF_DROP_SIMPLE_CONS;
 	}
@@ -218,11 +218,17 @@ static int install_filter(bool capture_all)
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE),
 	};
 
-	struct sock_filter filter[ARRAY_SIZE(filter_header) + num_syscalls + ARRAY_SIZE(filter_footer)] = {0};
+	size_t filter_size = ARRAY_SIZE(filter_header) + num_syscalls + ARRAY_SIZE(filter_footer);
+	char* buf = (char*)calloc(sizeof(struct sock_fprog) + filter_size * sizeof(struct sock_filter), 1);
+	if(!buf) {
+		return NULL;
+	}
+
+	struct sock_filter* filter = (struct sock_filter*)(buf + sizeof(struct sock_fprog));
+	struct sock_fprog* prog = (struct sock_fprog*)buf;
 
 	memcpy(&filter[0], filter_header, sizeof(filter_header));
 	int insn = ARRAY_SIZE(filter_header);
-
 
 	for(size_t i = 0; i < num_syscalls; ++i) {
 		uint8_t jmp_off = num_syscalls - i;
@@ -231,53 +237,15 @@ static int install_filter(bool capture_all)
 
 	memcpy(&filter[insn], filter_footer, sizeof(filter_footer));
 
-	struct sock_fprog prog = {
-		.len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
-		.filter = filter
-	};
-
-	EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0));
-	return 0;
+	prog->len = (unsigned short)filter_size;
+	prog->filter = filter;
+	return prog;
 }
 
-static void usage()
+static pid_t spawn(int argc, char** argv, bool capture_all)
 {
-    printf(
-"Usage: pdig [options] comdline\n\n"
-"Options:\n"
-" -a, --capture_all  capture all of the system calls and not only the ones used by falco.\n"
-" -h, --help         Print this page\n"
-);
-}
-
-int main(int argc, char **argv)
-{
-	int exitcode = 0;
-	bool capture_all = false;
-	int op;
-	int long_index = 0;
-
-	static struct option long_options[] =
-	{
-		{"capture_all", no_argument, 0, 'a' },
-		{"help", no_argument, 0, 'h' }
-	};
-
-	while((op = getopt_long(argc, argv, "ah", long_options, &long_index)) != -1) {
-		switch(op) {
-		case 'a':
-			capture_all = true;
-			break;
-		case 'h':
-			usage();
-			return exitcode;
-		default:
-			break;
-		}
-	}
-
+	struct sock_fprog* prog;
 	pid_t pid = fork();
-	pid_t mainpid = pid;
 	switch(pid) {
 		case 0: /* child */
 			DEBUG("child forked, pid = %d\n", getpid());
@@ -286,14 +254,205 @@ int main(int argc, char **argv)
 			EXPECT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
 			DEBUG("NO_NEW_PRIVS done\n");
 			EXPECT(raise(SIGSTOP));
-			install_filter(capture_all);
+			prog = build_filter(capture_all);
+			EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prog, 0, 0));
+			free(prog);
 			DEBUG("child calling execve\n");
-			execvp(argv[optind], argv+optind);
+			execvp(argv[0], argv);
 			DEBUG("child execve failed\n");
 			abort();
 		case -1: /* error */
 			abort();
 	}
+
+	return pid;
+}
+
+unsigned long copy_to_user(pid_t pid, void* from, void* to, unsigned long n)
+{
+	struct iovec local_iov[] = {{
+		.iov_base = from,
+		.iov_len = n,
+	}};
+	struct iovec remote_iov[] = {{
+		.iov_base = to,
+		.iov_len = n,
+	}};
+
+	if (process_vm_writev(pid, local_iov, 1, remote_iov, 1, 0) >= 0) {
+		return 0;
+	}
+
+	if(n % sizeof(long) != 0) {
+		abort();
+	}
+
+	unsigned long *ulfrom = (unsigned long*) from;
+	unsigned long *ulto = (unsigned long*) to;
+	for (unsigned long i = 0; i < n / sizeof(long); ++i) {
+		EXPECT(ptrace(PTRACE_POKETEXT, pid, (void*) ulto, *ulfrom));
+		ulfrom++;
+		ulto++;
+	}
+
+	return 0;
+}
+
+static int step(pid_t target)
+{
+	int status;
+
+	EXPECT(ptrace(PTRACE_SINGLESTEP, target, NULL, NULL));
+	EXPECT(waitpid(target, &status, WSTOPPED));
+
+	if(!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+		abort();
+	}
+	return 0;
+}
+
+static int attach(pid_t target, bool capture_all)
+{
+	struct sock_fprog* prog = build_filter(capture_all);
+	struct user_regs_struct saved_regs;
+
+	set_pid(target);
+	EXPECT(ptrace(PTRACE_ATTACH, target, NULL, NULL));
+	EXPECT(waitpid(target, 0, WUNTRACED));
+	EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESECCOMP)));
+	EXPECT(ptrace(PTRACE_GETREGS, target, &saved_regs, &saved_regs));
+
+	DEBUG("original rip = %016llx\n", saved_regs.rip);
+
+	uint8_t patch[] = {
+		0x0f, 0x05, // syscall (mmap)
+		0x0f, 0x05, // syscall (no_new_privs)
+		0x0f, 0x05, // syscall (seccomp)
+		0x0f, 0x05, // syscall (munmap)
+
+		0xff, 0xe0, // jmp %rax
+		0x66, 0x90, // nop
+		0x66, 0x90, // nop
+		0x66, 0x90, // nop
+	};
+	uint8_t saved_text[sizeof(patch)];
+
+	struct user_regs_struct new_regs = saved_regs;
+
+	EXPECT(ppm_copy_from_user(saved_text, (void*)saved_regs.rip, sizeof(saved_text)));
+	EXPECT(copy_to_user(target, patch, (void*)saved_regs.rip, sizeof(patch)));
+
+	new_regs.rax = __NR_mmap;
+	new_regs.rdi = 0; // addr
+	new_regs.rsi = PAGE_SIZE; // size
+	new_regs.rdx = PROT_READ | PROT_EXEC;
+	new_regs.r10 = MAP_PRIVATE | MAP_ANONYMOUS;
+	new_regs.r8 = -1; // fd
+	new_regs.r9 = 0; // offset
+	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
+	DEBUG("setting rip = %016llx\n", new_regs.rip);
+
+	EXPECT(step(target)); // syscall (mmap)
+	EXPECT(ptrace(PTRACE_GETREGS, target, &new_regs, &new_regs));
+	DEBUG("rip now = %016llx\n", new_regs.rip);
+	unsigned long mmapped = new_regs.rax;
+
+	unsigned long payload_len = sizeof(*prog) + prog->len * sizeof(prog->filter[0]);
+	prog->filter = (struct sock_filter*)(mmapped + sizeof(*prog));
+	DEBUG("mapped a page at %016lx, copying payload of %lu bytes\n", mmapped, payload_len);
+
+	DEBUG("filter is at %p\n", prog->filter);
+	EXPECT(copy_to_user(target, (void*)prog, (void*)mmapped, payload_len));
+	free(prog);
+
+	new_regs.rax = __NR_prctl;
+	new_regs.rdi = PR_SET_NO_NEW_PRIVS;
+	new_regs.rsi = 1;
+	new_regs.rdx = 0;
+	new_regs.r10 = 0;
+	new_regs.r8 = 0;
+	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
+	EXPECT(step(target)); // syscall (no_new_privs)
+
+	// EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0));
+	new_regs.rax = __NR_prctl;
+	new_regs.rdi = PR_SET_SECCOMP;
+	new_regs.rsi = SECCOMP_MODE_FILTER;
+	new_regs.rdx = mmapped;
+	new_regs.r10 = 0;
+	new_regs.r8 = 0;
+	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
+	EXPECT(step(target)); // syscall (seccomp)
+
+	new_regs.rax = __NR_munmap;
+	new_regs.rdi = mmapped;
+	new_regs.rsi = PAGE_SIZE;
+	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
+	EXPECT(step(target)); // syscall (munmap)
+
+	new_regs.rax = mmapped;
+	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
+	EXPECT(step(target)); // jmp %rax
+
+	EXPECT(ptrace(PTRACE_SETREGS, target, &saved_regs, &saved_regs));
+	EXPECT(copy_to_user(target, saved_text, (void*)saved_regs.rip, sizeof(saved_text)));
+
+	EXPECT(ptrace(PTRACE_CONT, target, NULL, NULL));
+	return 0;
+}
+
+static void usage()
+{
+	printf(
+"Usage: pdig [options] comdline\n\n"
+"Options:\n"
+" -a, --capture_all  capture all of the system calls and not only the ones used by falco.\n"
+" -p PID, --pid PID  attach to an already running process.\n"
+" -h, --help         Print this page\n"
+);
+}
+
+int main(int argc, char **argv)
+{
+	pid_t pid = -1;
+	int exitcode = 0;
+	bool capture_all = false;
+	int op;
+	int long_index = 0;
+
+	static struct option long_options[] =
+	{
+		{"capture_all", no_argument, 0, 'a' },
+		{"pid", required_argument, 0, 'p' },
+		{"help", no_argument, 0, 'h' }
+	};
+
+	while((op = getopt_long(argc, argv, "ap:h", long_options, &long_index)) != -1) {
+		switch(op) {
+			case 'a':
+				capture_all = true;
+				break;
+			case 'p':
+				pid = atoi(optarg);
+				break;
+			case 'h':
+				usage();
+				return exitcode;
+			default:
+				break;
+		}
+	}
+
+	if(pid != -1)
+	{
+		EXPECT(attach(pid, capture_all));
+	}
+	else
+	{
+		pid = spawn(argc - optind, argv + optind, capture_all);
+	}
+
+	pid_t mainpid = pid;
 
 	EXPECT(pdig_init_shm());
 	DEBUG("parent pid = %d\n", getpid());
