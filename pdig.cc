@@ -406,7 +406,7 @@ static void usage()
 	printf(
 "Usage: pdig [options] comdline\n\n"
 "Options:\n"
-" -a, --capture_all  capture all of the system calls and not only the ones used by falco.\n"
+" -a, --capture-all  capture all of the system calls and not only the ones used by falco.\n"
 " -p PID, --pid PID  attach to an already running process.\n"
 " -h, --help         Print this page\n"
 );
@@ -422,7 +422,7 @@ int main(int argc, char **argv)
 
 	static struct option long_options[] =
 	{
-		{"capture_all", no_argument, 0, 'a' },
+		{"capture-all", no_argument, 0, 'a' },
 		{"pid", required_argument, 0, 'p' },
 		{"help", no_argument, 0, 'h' }
 	};
