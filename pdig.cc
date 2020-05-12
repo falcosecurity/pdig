@@ -188,13 +188,13 @@ static struct sock_fprog* build_filter(bool capture_all)
 
 		enum ppm_event_type enter_event = g_syscall_table[i].enter_event_type;
 		uint32_t enter_event_flags = g_event_info[enter_event].flags;
-		if ((enter_event_flags & filtered_flags) != 0) {
+		if ((enter_event_flags & filtered_flags) != 0 && (enter_event_flags & EF_MODIFIES_STATE) == 0) {
 			continue;
 		}
 
 		enum ppm_event_type exit_event = g_syscall_table[i].exit_event_type;
 		uint32_t exit_event_flags = g_event_info[exit_event].flags;
-		if ((exit_event_flags & filtered_flags) != 0) {
+		if ((exit_event_flags & filtered_flags) != 0 && (exit_event_flags & EF_MODIFIES_STATE) == 0) {
 			continue;
 		}
 
