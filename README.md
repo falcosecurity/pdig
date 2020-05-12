@@ -16,7 +16,7 @@ This means you cannot use the high-performance in-kernel tracing, but with pdig 
 
 #### Instructions
 
-    git clone https://github.com/ografa/pdig
+    git clone https://github.com/falcosecurity/pdig
     git clone https://github.com/draios/sysdig
     cd pdig
     mkdir -p build
