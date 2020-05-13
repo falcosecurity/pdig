@@ -453,7 +453,7 @@ int main(int argc, char **argv)
 		{"help", no_argument, 0, 'h' }
 	};
 
-	while((op = getopt_long(argc, argv, "ap:Sh", long_options, &long_index)) != -1) {
+	while((op = getopt_long(argc, argv, "+ap:Sh", long_options, &long_index)) != -1) {
 		switch(op) {
 			case 'a':
 				capture_all = true;
