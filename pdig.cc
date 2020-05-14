@@ -217,10 +217,16 @@ static struct sock_fprog* build_filter(bool capture_all)
 
 	struct sock_filter filter_footer[] = {
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE),
 	};
 
-	size_t filter_size = ARRAY_SIZE(filter_header) + num_syscalls + ARRAY_SIZE(filter_footer);
+	const size_t CHUNK_SIZE = 16; // must be < 256
+
+	size_t num_chunks = (num_syscalls + CHUNK_SIZE - 1) / CHUNK_SIZE;
+	size_t last_chunk_len = num_syscalls % CHUNK_SIZE;
+	size_t trace_insn = ARRAY_SIZE(filter_header) - 1;
+
+	size_t filter_size = ARRAY_SIZE(filter_header) + num_syscalls + num_chunks + ARRAY_SIZE(filter_footer);
+	DEBUG("filter has %zu insns\n", filter_size);
 	char* buf = (char*)calloc(sizeof(struct sock_fprog) + filter_size * sizeof(struct sock_filter), 1);
 	if(!buf) {
 		return NULL;
@@ -233,9 +239,41 @@ static struct sock_fprog* build_filter(bool capture_all)
 	int insn = ARRAY_SIZE(filter_header);
 
 	for(size_t i = 0; i < num_syscalls; ++i) {
-		uint8_t jmp_off = num_syscalls - i;
-		filter[insn++] = BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, instrumented_syscalls[i], jmp_off, 0);
+		size_t chunk = i / CHUNK_SIZE;
+		size_t chunk_off = i % CHUNK_SIZE;
+		size_t current_chunk_size;
+		if (chunk == num_chunks - 1) {
+			current_chunk_size = last_chunk_len;
+		} else {
+			current_chunk_size = CHUNK_SIZE;
+		}
+		int at_chunk_end = (chunk_off == current_chunk_size - 1);
+
+		if (chunk_off == 0) {
+			trace_insn += current_chunk_size + 1;
+			if (chunk != 0) {
+				DEBUG("[insn#%d] RET_TRACE\n", insn);
+				filter[insn++] = BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE);
+			}
+		}
+
+		int jt = trace_insn - insn - 1;
+		int jf = at_chunk_end;
+
+		if(jt != (uint8_t)jt) {
+			abort();
+		}
+
+		if(jf != (uint8_t)jf) {
+			abort();
+		}
+
+		DEBUG("[insn#%d] if nr == %d { goto +%d (%d) } else { goto +%d (%d) }\n",
+			insn, instrumented_syscalls[i], jt, insn + jt + 1, jf, insn + jf + 1);
+		filter[insn++] = BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, instrumented_syscalls[i], (uint8_t)jt, (uint8_t)jf);
 	}
+	DEBUG("[insn#%d] RET_TRACE\n", insn);
+	filter[insn++] = BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE);
 
 	memcpy(&filter[insn], filter_footer, sizeof(filter_footer));
 
