@@ -219,7 +219,7 @@ static struct sock_fprog* build_filter(bool capture_all)
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 	};
 
-	const size_t CHUNK_SIZE = 16; // must be < 256
+	const size_t CHUNK_SIZE = 255; // must be < 256
 
 	size_t num_chunks = (num_syscalls + CHUNK_SIZE - 1) / CHUNK_SIZE;
 	size_t last_chunk_len = num_syscalls % CHUNK_SIZE;
