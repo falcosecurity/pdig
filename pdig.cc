@@ -173,34 +173,31 @@ int get_pid(pid_t tid)
 static struct sock_fprog* build_filter(bool capture_all)
 {
 	size_t num_syscalls = 0;
-	uint32_t filtered_flags = EF_UNUSED;
-	if(!capture_all) {
-		filtered_flags |= EF_DROP_SIMPLE_CONS;
-	}
 
 	uint32_t instrumented_syscalls[SYSCALL_TABLE_SIZE] = {0};
 
 	for(size_t i=0; i<SYSCALL_TABLE_SIZE; ++i) {
 		uint32_t flags = g_syscall_table[i].flags;
-		if ((flags & (UF_USED | UF_ALWAYS_DROP)) != UF_USED) {
+		if (!(flags & UF_USED)) {
 			continue;
 		}
 
-		enum ppm_event_type enter_event = g_syscall_table[i].enter_event_type;
-		uint32_t enter_event_flags = g_event_info[enter_event].flags;
-		if ((enter_event_flags & filtered_flags) != 0 && (enter_event_flags & EF_MODIFIES_STATE) == 0) {
-			continue;
+		bool instrument = capture_all;
+
+		if(!instrument) {
+			enum ppm_event_type enter_event = g_syscall_table[i].enter_event_type;
+			enum ppm_event_type exit_event = g_syscall_table[i].exit_event_type;
+
+			uint32_t enter_event_flags = g_event_info[enter_event].flags;
+			uint32_t exit_event_flags = g_event_info[exit_event].flags;
+
+			instrument = (enter_event_flags & EF_MODIFIES_STATE) || (exit_event_flags & EF_MODIFIES_STATE);
 		}
 
-		enum ppm_event_type exit_event = g_syscall_table[i].exit_event_type;
-		uint32_t exit_event_flags = g_event_info[exit_event].flags;
-		if ((exit_event_flags & filtered_flags) != 0 && (exit_event_flags & EF_MODIFIES_STATE) == 0) {
-			continue;
+		if(instrument) {
+			instrumented_syscalls[num_syscalls++] = i;
+			DEBUG("syscall#%zu flags %08x enter flags = %08x exit flags = %08x\n", i, g_syscall_table[i].flags, enter_event_flags, exit_event_flags);
 		}
-
-		instrumented_syscalls[num_syscalls++] = i;
-
-		DEBUG("syscall#%zu flags %08x enter flags = %08x exit flags = %08x\n", i, g_syscall_table[i].flags, enter_event_flags, exit_event_flags);
 	}
 
 	struct sock_filter filter_header[] = {
