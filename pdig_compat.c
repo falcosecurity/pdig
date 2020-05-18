@@ -9,6 +9,7 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <syscall.h>
+#include <sys/signal.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <time.h>
@@ -17,6 +18,7 @@
 #include <limits.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
+#include <sys/wait.h>
 
 #include <arpa/inet.h> // dbg
 
@@ -100,6 +102,13 @@ static pid_t the_pid;
 void set_pid(pid_t pid)
 {
 	the_pid = pid;
+}
+
+static bool is_enter;
+
+void set_direction(bool enter)
+{
+	is_enter = enter;
 }
 
 static __inline__ uint64_t ctx_getpid(uint64_t* context)
@@ -195,6 +204,49 @@ void ppm_syscall_get_arguments(void* task, uint64_t* regs, uint64_t* args)
 void syscall_get_arguments_deprecated(void* task, uint64_t* regs, uint32_t start, uint32_t len, uint64_t* args)
 {
 	memcpy(args, regs + CTX_ARGS_BASE + start, len * sizeof(uint64_t));
+}
+
+unsigned long copy_to_user(pid_t pid, void* from, void* to, unsigned long n)
+{
+	struct iovec local_iov[] = {{
+		.iov_base = from,
+		.iov_len = n,
+	}};
+	struct iovec remote_iov[] = {{
+		.iov_base = to,
+		.iov_len = n,
+	}};
+
+	if (process_vm_writev(pid, local_iov, 1, remote_iov, 1, 0) >= 0) {
+		return 0;
+	}
+
+	if(n % sizeof(long) != 0) {
+		abort();
+	}
+
+	unsigned long *ulfrom = (unsigned long*) from;
+	unsigned long *ulto = (unsigned long*) to;
+	for (unsigned long i = 0; i < n / sizeof(long); ++i) {
+		EXPECT(ptrace(PTRACE_POKETEXT, pid, (void*) ulto, *ulfrom));
+		ulfrom++;
+		ulto++;
+	}
+
+	return 0;
+}
+
+int step(pid_t target)
+{
+	int status;
+
+	EXPECT(ptrace(PTRACE_SINGLESTEP, target, NULL, NULL));
+	EXPECT(waitpid(target, &status, WSTOPPED));
+
+	if(!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+		abort();
+	}
+	return 0;
 }
 
 static int record_event(enum ppm_event_type event_type, enum syscall_flags drop_flags,
@@ -528,6 +580,8 @@ void on_syscall(uint64_t* context, bool is_enter)
 #endif
 	}
 
+	set_direction(is_enter);
+
 	//
 	// Get ready for record_event
 	//
@@ -599,121 +653,74 @@ void on_syscall(uint64_t* context, bool is_enter)
 #endif
 }
 
-static unsigned long long get_fd_inode(pid_t pid, int fd)
+static int udig_getXXXXname(int fd, struct sockaddr *sock_address, socklen_t *alen, unsigned long syscall_no)
 {
-	char buf[PATH_MAX];
-	unsigned long long inode;
-	snprintf(buf, sizeof(buf), "/proc/%d/fd/%d", pid, fd);
-	if (readlink(buf, buf, sizeof(buf)) < 0) {
+	// can't call a syscall in the middle of another one :(
+	if(is_enter) { return -1; }
+
+	struct user_regs_struct regs;
+	EXPECT(ptrace(PTRACE_GETREGS, the_pid, &regs, &regs));
+
+	// stack layout while running our injected system call
+	//
+	//                      ~~~~~~~~ 128 bytes (amd64)
+	//        ~~~~~~~~~~~~ *alen
+	//  ~~~~  socklen_t
+	// [alen][sock_address][red zone][orig stack]
+	// ^     ^                       ^
+	// |     |                       regs.rsp
+	// |     rsi
+	// rdx, new_rsp
+	const size_t RED_ZONE = 128; // amd64
+	unsigned long new_rsp = regs.rsp - RED_ZONE - *alen - sizeof(socklen_t);
+
+	struct user_regs_struct inject_regs = regs;
+	inject_regs.rax = syscall_no;
+	inject_regs.rdi = fd;
+	inject_regs.rsi = new_rsp + sizeof(socklen_t);
+	inject_regs.rdx = new_rsp;
+	inject_regs.rip = regs.rip - 2; // syscall insn is two bytes long
+	inject_regs.rsp = new_rsp;
+	EXPECT(ptrace(PTRACE_SETREGS, the_pid, &inject_regs, &inject_regs));
+	EXPECT(copy_to_user(the_pid, alen, (void*)new_rsp, sizeof(socklen_t)));
+	step(the_pid);
+	EXPECT(ptrace(PTRACE_GETREGS, the_pid, &inject_regs, &inject_regs));
+	EXPECT(ptrace(PTRACE_SETREGS, the_pid, &regs, &regs));
+
+	int ret = inject_regs.rax;
+	if(ret < 0) {
 		return -1;
 	}
 
-	if(sscanf(buf, "socket:[%llu]", &inode) != 1) {
-		return -1;
-	}
-
-	return inode;
-}
-
-static int get_sock_addr_impl(const char* path, unsigned long long inode, struct sockaddr *sa, socklen_t *sa_len, int family, bool remote)
-{
-	char buf[PATH_MAX];
-	unsigned int ipv6[4];
-	unsigned int ipv4;
-	unsigned short port;
-	unsigned long long sock_ino;
-	int ret = -1;
-
-	FILE* fp = fopen(path, "rb");
-	if(!fp) {
-		return -1;
-	}
-
-	while(fgets(buf, sizeof(buf), fp) != NULL) {
-		if(family == AF_INET) {
-			if(!remote) {
-				ret = sscanf(buf, " %*d: %08x:%04hx %*08x:%*04x %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv4, &port, &sock_ino);
-			} else {
-				ret = sscanf(buf, " %*d: %*08x:%*04x %08x:%04hx %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv4, &port, &sock_ino);
-			}
-			if (ret != 3 || sock_ino != inode) {
-				ret = -1;
-				continue;
-			}
-
-			struct sockaddr_in *sa_in = (struct sockaddr_in*)sa;
-			*sa_len = sizeof(*sa_in);
-			sa_in->sin_family = family;
-			sa_in->sin_port = htons(port);
-			sa_in->sin_addr.s_addr = ipv4;
-			ret = 0;
-
-			break;
-		} else if(family == AF_INET6) {
-			if(!remote) {
-				ret = sscanf(buf, " %*d: %08x%08x%08x%08x:%04hx %*032x:%*04x %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv6[0], &ipv6[1], &ipv6[2], &ipv6[3], &port, &sock_ino);
-			} else {
-				ret = sscanf(buf, " %*d: %*032x:%*04x %08x%08x%08x%08x:%04hx %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv6[0], &ipv6[1], &ipv6[2], &ipv6[3], &port, &sock_ino);
-			}
-			if (ret != 6 || sock_ino != inode) {
-				ret = -1;
-				continue;
-			}
-
-			struct sockaddr_in6 *sa_in = (struct sockaddr_in6*)sa;
-			*sa_len = sizeof(*sa_in);
-			sa_in->sin6_family = family;
-			sa_in->sin6_port = htons(port);
-			sa_in->sin6_flowinfo = 0; // ?
-			sa_in->sin6_scope_id = 0; // ?
-			memcpy(sa_in->sin6_addr.s6_addr, ipv6, 16);
-			ret = 0;
-
-			break;
-		} else {
-			return -1;
+	struct iovec local_iov[] = {
+		{
+			.iov_base = alen,
+			.iov_len = sizeof(socklen_t),
+		},
+		{
+			.iov_base = sock_address,
+			.iov_len = *alen,
 		}
+	};
+	struct iovec remote_iov[] = {{
+		.iov_base = (void*)new_rsp,
+		.iov_len = sizeof(socklen_t) + *alen,
+	}};
+
+	int nread = process_vm_readv(the_pid, local_iov, 2, remote_iov, 1, 0);
+	if (nread != remote_iov[0].iov_len) { // *alen is (hopefully) overwritten by now
+		return -1;
 	}
 
-	fclose(fp);
 	return ret;
 }
 
-static int get_sock_addr(unsigned long long inode, struct sockaddr *sa, socklen_t *sa_len, bool remote)
-{
-	int ret;
-	ret = get_sock_addr_impl("/proc/net/tcp", inode, sa, sa_len, AF_INET, remote);
-	if (ret == 0) return ret;
-
-	ret = get_sock_addr_impl("/proc/net/udp", inode, sa, sa_len, AF_INET, remote);
-	if (ret == 0) return ret;
-
-	ret = get_sock_addr_impl("/proc/net/tcp6", inode, sa, sa_len, AF_INET6, remote);
-	if (ret == 0) return ret;
-
-	ret = get_sock_addr_impl("/proc/net/udp6", inode, sa, sa_len, AF_INET6, remote);
-	if (ret == 0) return ret;
-
-	memset(sa, 0, *sa_len);
-
-	return -1;
-}
-
-// TODO these should be probably cached, or, at the very least, get the socket/peer address at once
-//      without parsing all the files twice
 int udig_getsockname(int fd, struct sockaddr *sock_address, socklen_t *alen)
 {
-	long long inode = get_fd_inode(the_pid, fd);
-	if (inode < 0) { return -1; }
-
-	return get_sock_addr(inode, sock_address, alen, false);
+	return udig_getXXXXname(fd, sock_address, alen, __NR_getsockname);
 }
 
 int udig_getpeername(int fd, struct sockaddr *sock_address, socklen_t *alen)
 {
-	long long inode = get_fd_inode(the_pid, fd);
-	if (inode < 0) { return -1; }
-
-	return get_sock_addr(inode, sock_address, alen, true);
+	return udig_getXXXXname(fd, sock_address, alen, __NR_getpeername);
 }
-
