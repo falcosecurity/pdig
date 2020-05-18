@@ -6,7 +6,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -45,22 +44,6 @@ extern "C" {
 #include "ppm_events_public.h"
 #include "ppm.h"
 }
-
-#define EXPECT(v) do { \
-    int __ret = (v); \
-	if(__ret < 0) { \
-		fprintf(stderr, "%s failed at %s:%d with %d (errno %s)\n", #v, __FILE__, __LINE__, __ret, strerror(errno)); \
-		abort(); \
-	} \
-} while(0)
-
-#ifdef _DEBUG
-#define DEBUG(...) fprintf(stderr, __VA_ARGS__)
-#else
-#define DEBUG(...)
-#endif
-
-#define WARN(fmt, ...) fprintf(stderr, fmt " at %s:%d (errno %s)\n", __VA_ARGS__, __FILE__, __LINE__, strerror(errno))
 
 void ignore_sig(int _sig)
 {
@@ -303,49 +286,6 @@ static pid_t spawn(int argc, char** argv, bool capture_all)
 	}
 
 	return pid;
-}
-
-unsigned long copy_to_user(pid_t pid, void* from, void* to, unsigned long n)
-{
-	struct iovec local_iov[] = {{
-		.iov_base = from,
-		.iov_len = n,
-	}};
-	struct iovec remote_iov[] = {{
-		.iov_base = to,
-		.iov_len = n,
-	}};
-
-	if (process_vm_writev(pid, local_iov, 1, remote_iov, 1, 0) >= 0) {
-		return 0;
-	}
-
-	if(n % sizeof(long) != 0) {
-		abort();
-	}
-
-	unsigned long *ulfrom = (unsigned long*) from;
-	unsigned long *ulto = (unsigned long*) to;
-	for (unsigned long i = 0; i < n / sizeof(long); ++i) {
-		EXPECT(ptrace(PTRACE_POKETEXT, pid, (void*) ulto, *ulfrom));
-		ulfrom++;
-		ulto++;
-	}
-
-	return 0;
-}
-
-static int step(pid_t target)
-{
-	int status;
-
-	EXPECT(ptrace(PTRACE_SINGLESTEP, target, NULL, NULL));
-	EXPECT(waitpid(target, &status, WSTOPPED));
-
-	if(!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-		abort();
-	}
-	return 0;
 }
 
 static int attach(pid_t target, bool use_seccomp, bool capture_all)
