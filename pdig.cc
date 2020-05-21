@@ -179,7 +179,6 @@ static struct sock_fprog* build_filter(bool capture_all)
 
 		if(instrument) {
 			instrumented_syscalls[num_syscalls++] = i;
-			DEBUG("syscall#%zu flags %08x enter flags = %08x exit flags = %08x\n", i, g_syscall_table[i].flags, enter_event_flags, exit_event_flags);
 		}
 	}
 
