@@ -206,7 +206,8 @@ static struct sock_fprog* build_filter(bool capture_all)
 
 	size_t filter_size = ARRAY_SIZE(filter_header) + num_syscalls + num_chunks + ARRAY_SIZE(filter_footer);
 	DEBUG("filter has %zu insns\n", filter_size);
-	char* buf = (char*)calloc(sizeof(struct sock_fprog) + filter_size * sizeof(struct sock_filter), 1);
+	size_t payload_size = sizeof(struct sock_fprog) + filter_size * sizeof(struct sock_filter);
+	char* buf = (char*)calloc((payload_size + 0x0f) & ~0x0f, 1);
 	if(!buf) {
 		return NULL;
 	}
@@ -289,99 +290,86 @@ static pid_t spawn(int argc, char** argv, bool capture_all)
 
 static int attach(pid_t target, bool use_seccomp, bool capture_all)
 {
-	struct sock_fprog* prog = build_filter(capture_all);
-	struct user_regs_struct saved_regs;
+	uint32_t flags = PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT;
+	if (capture_all) {
+		flags |= PTRACE_O_TRACESECCOMP;
+	}
 
 	set_pid(target);
 	EXPECT(ptrace(PTRACE_ATTACH, target, NULL, NULL));
 	EXPECT(waitpid(target, 0, WUNTRACED));
-	if(!use_seccomp) {
-		EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT)));
+	EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)flags));
+	EXPECT(ptrace(PTRACE_SYSCALL, target, NULL, NULL));
 
-		EXPECT(ptrace(PTRACE_SYSCALL, target, NULL, NULL));
+	if(!use_seccomp) {
 		return 0;
 	}
 
-	EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESECCOMP)));
+	struct sock_fprog* prog = build_filter(capture_all);
+	struct user_regs_struct saved_regs;
+	int status;
+
+	EXPECT(waitpid(target, 0, WUNTRACED));
+	// ^^ syscall-enter-stop
+
+	EXPECT(ptrace(PTRACE_SYSCALL, target, NULL, NULL));
+	EXPECT(waitpid(target, 0, WUNTRACED));
+	// ^^ syscall-exit-stop
 
 	EXPECT(ptrace(PTRACE_GETREGS, target, &saved_regs, &saved_regs));
 
-	DEBUG("original rip = %016llx\n", saved_regs.rip);
+	struct user_regs_struct regs = saved_regs;
+	regs.rax = __NR_prctl;
+	regs.rdi = PR_SET_NO_NEW_PRIVS;
+	regs.rsi = 1;
+	regs.rdx = 0;
+	regs.r10 = 0;
+	regs.r8 = 0;
+	regs.rip = saved_regs.rip - 2;
+	EXPECT(ptrace(PTRACE_SETREGS, target, &regs, &regs));
+	EXPECT(step(target));
+	EXPECT(ptrace(PTRACE_GETREGS, target, &regs, &regs));
+	if(regs.rax != 0) {
+		abort();
+	}
 
-	uint8_t patch[] = {
-		0x0f, 0x05, // syscall (mmap)
-		0x0f, 0x05, // syscall (no_new_privs)
-		0x0f, 0x05, // syscall (seccomp)
-		0x0f, 0x05, // syscall (munmap)
-
-		0xff, 0xe0, // jmp %rax
-		0x66, 0x90, // nop
-		0x66, 0x90, // nop
-		0x66, 0x90, // nop
-	};
-	uint8_t saved_text[sizeof(patch)];
-
-	struct user_regs_struct new_regs = saved_regs;
-
-	EXPECT(ppm_copy_from_user(saved_text, (void*)saved_regs.rip, sizeof(saved_text)));
-	EXPECT(copy_to_user(target, patch, (void*)saved_regs.rip, sizeof(patch)));
-
-	new_regs.rax = __NR_mmap;
-	new_regs.rdi = 0; // addr
-	new_regs.rsi = PAGE_SIZE; // size
-	new_regs.rdx = PROT_READ | PROT_EXEC;
-	new_regs.r10 = MAP_PRIVATE | MAP_ANONYMOUS;
-	new_regs.r8 = -1; // fd
-	new_regs.r9 = 0; // offset
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	DEBUG("setting rip = %016llx\n", new_regs.rip);
-
-	EXPECT(step(target)); // syscall (mmap)
-	EXPECT(ptrace(PTRACE_GETREGS, target, &new_regs, &new_regs));
-	DEBUG("rip now = %016llx\n", new_regs.rip);
-	unsigned long mmapped = new_regs.rax;
+	// stack layout
+	//
+	// [prog][sock_filter[]][red zone][orig stack]
+	// ^     ^                        ^
+	// |     |                        saved_regs.rsp
+	// |     sock_fprog->filter
+	// rdx, rsp
 
 	unsigned long payload_len = sizeof(*prog) + prog->len * sizeof(prog->filter[0]);
-	prog->filter = (struct sock_filter*)(mmapped + sizeof(*prog));
-	DEBUG("mapped a page at %016lx, copying payload of %lu bytes\n", mmapped, payload_len);
+	unsigned long payload_addr = (saved_regs.rsp - payload_len - 128) & ~0x0f;
+	regs = saved_regs;
+	regs.rax = __NR_prctl;
+	regs.rdi = PR_SET_SECCOMP;
+	regs.rsi = SECCOMP_MODE_FILTER;
+	regs.rdx = payload_addr;
+	prog->filter = (struct sock_filter*)(payload_addr + sizeof(*prog));
+	regs.r10 = 0;
+	regs.r8 = 0;
+	regs.rip = saved_regs.rip - 2;
+	regs.rsp = payload_addr;
 
-	DEBUG("filter is at %p\n", prog->filter);
-	EXPECT(copy_to_user(target, (void*)prog, (void*)mmapped, payload_len));
-	free(prog);
+	copy_to_user(target, prog, (void*)payload_addr, (payload_len + 0x0f) & ~0x0f);
 
-	new_regs.rax = __NR_prctl;
-	new_regs.rdi = PR_SET_NO_NEW_PRIVS;
-	new_regs.rsi = 1;
-	new_regs.rdx = 0;
-	new_regs.r10 = 0;
-	new_regs.r8 = 0;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // syscall (no_new_privs)
+	EXPECT(ptrace(PTRACE_SETREGS, target, &regs, &regs));
+	EXPECT(step(target));
+	EXPECT(ptrace(PTRACE_GETREGS, target, &regs, &regs));
+	if(regs.rax != 0) {
+		abort();
+	}
 
-	// EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0));
-	new_regs.rax = __NR_prctl;
-	new_regs.rdi = PR_SET_SECCOMP;
-	new_regs.rsi = SECCOMP_MODE_FILTER;
-	new_regs.rdx = mmapped;
-	new_regs.r10 = 0;
-	new_regs.r8 = 0;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // syscall (seccomp)
-
-	new_regs.rax = __NR_munmap;
-	new_regs.rdi = mmapped;
-	new_regs.rsi = PAGE_SIZE;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // syscall (munmap)
-
-	new_regs.rax = mmapped;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // jmp %rax
+//  ----
 
 	EXPECT(ptrace(PTRACE_SETREGS, target, &saved_regs, &saved_regs));
-	EXPECT(copy_to_user(target, saved_text, (void*)saved_regs.rip, sizeof(saved_text)));
-
 	EXPECT(ptrace(PTRACE_CONT, target, NULL, NULL));
+	// next waitpid will be syscall enter triggered by seccomp
+
+	free(prog);
 	return 0;
 }
 
