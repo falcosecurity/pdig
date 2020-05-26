@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,14 +256,14 @@ int32_t scap_proc_fill_info_from_stats(char* procdirname, struct scap_threadinfo
 	f = fopen(filename, "r");
 	if(f == NULL)
 	{
-		cprintf("read stat file %s failed (%s)", filename);
+		cprintf("read stat file %s failed (%s)", filename, strerror(errno));
 		return PPM_FAILURE_BUG;
 	}
 
 	if(fgets(line, sizeof(line), f) == NULL)
 	{
 		fclose(f);
-		cprintf("Could not read from stat file %s (%s)", filename);
+		cprintf("Could not read from stat file %s (%s)", filename, strerror(errno));
 		return PPM_FAILURE_BUG;
 	}
 

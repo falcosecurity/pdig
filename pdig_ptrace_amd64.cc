@@ -1,11 +1,8 @@
 #include "pdig_ptrace.h"
 #include "pdig_debug.h"
-extern "C" {
-#include "pdig.h"
-}
-
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <stdint.h>
 #include <syscall.h>
 #include <sys/prctl.h>
 #include <sys/user.h>
