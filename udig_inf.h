@@ -4,10 +4,6 @@
 #include "ppm_events_public.h"
 #include "ppm_events.h"
 
-#ifndef MIN
-#define MIN(X,Y) ((X) < (Y)? (X):(Y))
-#endif
-
 //#include "../settings.h"
 
 #define MAX_HOLE_SIZE 16

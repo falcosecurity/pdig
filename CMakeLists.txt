@@ -23,6 +23,9 @@ include_directories(${SYSDIG_DIR}/userspace/libscap)
 add_executable(pdig
     pdig.cc
 	pdig_compat.c
+	pdig_ptrace.c
+	pdig_ptrace_amd64.cc
+	pdig_seccomp.cc
     udig_procs.c
     ${SYSDIG_DIR}/driver/dynamic_params_table.c
     ${SYSDIG_DIR}/driver/event_table.c

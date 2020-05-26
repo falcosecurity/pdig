@@ -4,19 +4,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
-
-typedef uint8_t __u8;
-typedef uint16_t __u16;
-typedef uint32_t __u32;
-typedef unsigned long long __u64;
+#include "pdig_linux.h"
+#include "pdig_ptrace.h"
 
 // This is never used at user level, so it doesn't matter
 typedef int __kernel_pid_t;
@@ -40,29 +29,6 @@ typedef int __kernel_pid_t;
 #define QFMT_VFS_V0 2
 #define QFMT_OCFS2 3
 #define QFMT_VFS_V1 4
-
-//
-// Arguments
-//
-#define CTX_REG_RDI 0
-#define CTX_REG_RSI 1
-#define CTX_REG_RDX 2
-#define CTX_REG_R10 3
-#define CTX_REG_R8 4
-#define CTX_REG_R9 5
-#define CTX_REG_RAX_ENTER 6
-#define CTX_REG_RAX 7
-#define CTX_PID_TID 8
-
-#define CTX_SYSCALL_ID CTX_REG_RAX_ENTER
-#define CTX_RETVAL CTX_REG_RAX
-#define CTX_ARG0 CTX_REG_RDI
-#define CTX_ARG1 CTX_REG_RSI
-#define CTX_ARG2 CTX_REG_RDX
-#define CTX_ARG3 CTX_REG_R10
-#define CTX_ARG4 CTX_REG_R8
-#define CTX_ARG5 CTX_REG_R9
-#define CTX_ARGS_BASE CTX_ARG0
 
 void ppm_syscall_get_arguments(void* task, uint64_t* regs, uint64_t* args);
 void syscall_get_arguments_deprecated(void* task, uint64_t* regs, uint32_t start, uint32_t len, uint64_t* args);
