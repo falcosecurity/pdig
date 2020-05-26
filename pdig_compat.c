@@ -28,6 +28,12 @@
 #include "scap.h"
 #include "ppm_ringbuffer.h"
 
+#include "pdig_ptrace.h"
+
+#ifndef MIN
+#define MIN(X,Y) ((X) < (Y)? (X):(Y))
+#endif
+
 extern const struct ppm_event_info g_event_info[];
 extern const struct syscall_evt_pair g_syscall_table[];
 extern const enum ppm_syscall_code g_syscall_code_routing_table[];
@@ -133,56 +139,14 @@ static __inline__ int ud_clock_gettime(clockid_t clk_id, struct timespec *tp)
 	return syscall(__NR_clock_gettime, clk_id, tp);
 }
 
-static inline void* page_align(void* ptr)
-{
-	uintptr_t aligned = ((uintptr_t)ptr & ~(PAGE_SIZE - 1));
-	return (void*)aligned;
-}
-
-static inline void* next_page(void* ptr)
-{
-	uintptr_t aligned = ((uintptr_t)ptr & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
-	return (void*)aligned;
-}
-
-unsigned long ppm_copy_from_user_impl(pid_t pid, void* to, void* from, unsigned long n)
-{
-	struct iovec local_iov[] = {{
-		.iov_base = to,
-		.iov_len = n,
-	}};
-
-	int first_page = ((uintptr_t)from) / PAGE_SIZE;
-	int last_page = ((uintptr_t)from + n) / PAGE_SIZE;
-	int npages = last_page - first_page + 1;
-
-	struct iovec remote_iov[npages];
-	void *ptr = from;
-	unsigned long to_read = n;
-
-	for(int p = 0; p < npages; ++p)
-	{
-		void* next_ptr = next_page(ptr);
-
-		unsigned long chunk = MIN(to_read, next_ptr - ptr);
-		remote_iov[p].iov_base = ptr;
-		remote_iov[p].iov_len = chunk;
-
-		to_read -= chunk;
-		ptr = next_ptr;
-	}
-	int ret = n - process_vm_readv(pid, local_iov, 1, remote_iov, npages, 0);
-	return ret;
-}
-
 unsigned long ppm_copy_from_user(void* to, const void* from, unsigned long n)
 {
-	return ppm_copy_from_user_impl(the_pid, to, (void*)from, n);
+	return copy_from_user(the_pid, to, (void*)from, n);
 }
 
 long ppm_strncpy_from_user_impl(pid_t pid, char* to, char* from, unsigned long n)
 {
-	int ret = ppm_copy_from_user_impl(pid, to, from, n);
+	int ret = copy_from_user(pid, to, from, n);
 	if (ret < 0) {
 		return ret;
 	}
@@ -204,49 +168,6 @@ void ppm_syscall_get_arguments(void* task, uint64_t* regs, uint64_t* args)
 void syscall_get_arguments_deprecated(void* task, uint64_t* regs, uint32_t start, uint32_t len, uint64_t* args)
 {
 	memcpy(args, regs + CTX_ARGS_BASE + start, len * sizeof(uint64_t));
-}
-
-unsigned long copy_to_user(pid_t pid, void* from, void* to, unsigned long n)
-{
-	struct iovec local_iov[] = {{
-		.iov_base = from,
-		.iov_len = n,
-	}};
-	struct iovec remote_iov[] = {{
-		.iov_base = to,
-		.iov_len = n,
-	}};
-
-	if (process_vm_writev(pid, local_iov, 1, remote_iov, 1, 0) >= 0) {
-		return 0;
-	}
-
-	if(n % sizeof(long) != 0) {
-		abort();
-	}
-
-	unsigned long *ulfrom = (unsigned long*) from;
-	unsigned long *ulto = (unsigned long*) to;
-	for (unsigned long i = 0; i < n / sizeof(long); ++i) {
-		EXPECT(ptrace(PTRACE_POKETEXT, pid, (void*) ulto, *ulfrom));
-		ulfrom++;
-		ulto++;
-	}
-
-	return 0;
-}
-
-int step(pid_t target)
-{
-	int status;
-
-	EXPECT(ptrace(PTRACE_SINGLESTEP, target, NULL, NULL));
-	EXPECT(waitpid(target, &status, WSTOPPED));
-
-	if(!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-		abort();
-	}
-	return 0;
 }
 
 static int record_event(enum ppm_event_type event_type, enum syscall_flags drop_flags,
@@ -653,74 +574,18 @@ void on_syscall(uint64_t* context, bool is_enter)
 #endif
 }
 
-static int udig_getXXXXname(int fd, struct sockaddr *sock_address, socklen_t *alen, unsigned long syscall_no)
+int udig_getsockname(int fd, struct sockaddr *sock_address, socklen_t *alen)
 {
 	// can't call a syscall in the middle of another one :(
 	if(is_enter) { return -1; }
 
-	struct user_regs_struct regs;
-	EXPECT(ptrace(PTRACE_GETREGS, the_pid, &regs, &regs));
-
-	// stack layout while running our injected system call
-	//
-	//                      ~~~~~~~~ 128 bytes (amd64)
-	//        ~~~~~~~~~~~~ *alen
-	//  ~~~~  socklen_t
-	// [alen][sock_address][red zone][orig stack]
-	// ^     ^                       ^
-	// |     |                       regs.rsp
-	// |     rsi
-	// rdx, new_rsp
-	const size_t RED_ZONE = 128; // amd64
-	unsigned long new_rsp = regs.rsp - RED_ZONE - *alen - sizeof(socklen_t);
-
-	struct user_regs_struct inject_regs = regs;
-	inject_regs.rax = syscall_no;
-	inject_regs.rdi = fd;
-	inject_regs.rsi = new_rsp + sizeof(socklen_t);
-	inject_regs.rdx = new_rsp;
-	inject_regs.rip = regs.rip - 2; // syscall insn is two bytes long
-	inject_regs.rsp = new_rsp;
-	EXPECT(ptrace(PTRACE_SETREGS, the_pid, &inject_regs, &inject_regs));
-	EXPECT(copy_to_user(the_pid, alen, (void*)new_rsp, sizeof(socklen_t)));
-	step(the_pid);
-	EXPECT(ptrace(PTRACE_GETREGS, the_pid, &inject_regs, &inject_regs));
-	EXPECT(ptrace(PTRACE_SETREGS, the_pid, &regs, &regs));
-
-	int ret = inject_regs.rax;
-	if(ret < 0) {
-		return -1;
-	}
-
-	struct iovec local_iov[] = {
-		{
-			.iov_base = alen,
-			.iov_len = sizeof(socklen_t),
-		},
-		{
-			.iov_base = sock_address,
-			.iov_len = *alen,
-		}
-	};
-	struct iovec remote_iov[] = {{
-		.iov_base = (void*)new_rsp,
-		.iov_len = sizeof(socklen_t) + *alen,
-	}};
-
-	int nread = process_vm_readv(the_pid, local_iov, 2, remote_iov, 1, 0);
-	if (nread != remote_iov[0].iov_len) { // *alen is (hopefully) overwritten by now
-		return -1;
-	}
-
-	return ret;
-}
-
-int udig_getsockname(int fd, struct sockaddr *sock_address, socklen_t *alen)
-{
-	return udig_getXXXXname(fd, sock_address, alen, __NR_getsockname);
+	return inject_getXXXXname(the_pid, fd, sock_address, alen, __NR_getsockname);
 }
 
 int udig_getpeername(int fd, struct sockaddr *sock_address, socklen_t *alen)
 {
-	return udig_getXXXXname(fd, sock_address, alen, __NR_getpeername);
+	// can't call a syscall in the middle of another one :(
+	if(is_enter) { return -1; }
+
+	return inject_getXXXXname(the_pid, fd, sock_address, alen, __NR_getpeername);
 }
