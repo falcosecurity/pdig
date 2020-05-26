@@ -20,11 +20,8 @@
 #include <netinet/ip.h>
 #include <sys/wait.h>
 
-#include <arpa/inet.h> // dbg
-
 #include "udig_capture.h"
 #include "udig_inf.h"
-#include "pdig.h"
 #include "scap.h"
 #include "ppm_ringbuffer.h"
 
@@ -66,31 +63,6 @@ int pdig_init_shm()
 	return 0;
 }
 
-void cwrite(char* str)
-{
-	write(2, str, strlen(str));
-}
-
-int cprintf(const char* format, ...)
-{
-	va_list args;
-	va_start(args, format);
-	int res = vsnprintf(g_console_print_buf, 
-		sizeof(g_console_print_buf) - 1, 
-		format, 
-		args);
-	va_end(args);
-
-	cwrite(g_console_print_buf);
-
-	return res;
-}
-
-uint8_t* patch_pointer(uint8_t* pointer)
-{
-	return pointer;
-}
-
 size_t strlcpy(char *dst, const char *src, size_t size)
 {
     const size_t srclen = strlen(src);
@@ -112,15 +84,9 @@ void set_pid(pid_t pid)
 
 static bool is_enter;
 
-void set_direction(bool enter)
+static void set_direction(bool enter)
 {
 	is_enter = enter;
-}
-
-static __inline__ uint64_t ctx_getpid(uint64_t* context)
-{
-	uint64_t res = context[CTX_PID_TID];
-	return res >> 32;
 }
 
 static __inline__ uint64_t ctx_gettid(uint64_t* context)
@@ -565,7 +531,7 @@ void on_syscall(uint64_t* context, bool is_enter)
 	}
 	else
 	{
-		cprintf("invalid table index %lu (tid: %d)\n", table_index, ctx_gettid(context));
+		cprintf("invalid table index %lu (tid: %lu)\n", table_index, ctx_gettid(context));
 		ASSERT(false);
 	}
 

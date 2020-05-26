@@ -22,4 +22,15 @@
 
 #define WARN(fmt, ...) fprintf(stderr, fmt " at %s:%d (errno %s)\n", __VA_ARGS__, __FILE__, __LINE__, strerror(errno))
 
+#define cprintf(...) fprintf(stderr, __VA_ARGS__)
+
+#ifdef _DEBUG
+#define ASSERT(X) if(!(X)) { \
+	fprintf(stderr, "%s:%d ASSERTION FAILED: "#X"\n", __FILE__, __LINE__); \
+	abort(); \
+}
+#else
+#define ASSERT(X)
+#endif
+
 #endif
