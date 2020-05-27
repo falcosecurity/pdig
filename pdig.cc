@@ -44,20 +44,24 @@ enum class process_state {
 
 
 struct pdig_process_context {
-	pdig_process_context(process_state state_, bool use_seccomp_, uint64_t clone_flags_, pid_t pid_):
+	pdig_process_context(process_state state_, bool use_seccomp_, pid_t pid_):
 		state(state_),
 		pid(pid_),
-		clone_flags(clone_flags_),
+		clone_syscall(0),
+		clone_flags(0),
 		use_seccomp(use_seccomp_)
 	{}
 
 	process_state state;
 	pid_t pid; // we know the tid but need to store the pid somewhere
 
-	// This is sort of subtle: when a thread is created, clone_flags contain
-	// the flags to clone() that this thread was created with
-	// but after the thread calls clone() itself, the flags get overwritten
-	// so that we can use them to know what to set in the child's clone_flags
+	// after a thread calls clone()/fork()/vfork(), store the flags
+	// here so that we can reconstruct the event in the child
+	// after we receive the ptrace CLONE event
+	// TODO: clone3() needs a struct passed as a pointer so we'll want
+	//       to revisit it, either by storing this struct here,
+	//       or storing the complete scap event
+	unsigned long clone_syscall;
 	uint64_t clone_flags;
 
 	bool use_seccomp;
@@ -122,34 +126,42 @@ void handle_syscall(pid_t pid, pdig_process_context& pctx, bool enter)
 {
 	struct user_regs_struct regs;
 	uint64_t context[CTX_SIZE];
+	unsigned long syscall_nr;
 
 	if (ptrace(PTRACE_GETREGS, pid, &regs, &regs) < 0) {
 		WARN("PTRACE_GETREGS failed for pid %d", pid);
 		return;
 	}
 	fill_context(context, pid, pctx.pid, regs);
+	syscall_nr = context[CTX_SYSCALL_ID];
 
 	DEBUG("pid=%d tid=%d syscall=%ld ret=%ld enter=%d\n",
-		pctx.pid, pid, context[CTX_SYSCALL_ID], context[CTX_RETVAL], enter);
+		pctx.pid, pid, syscall_nr, context[CTX_RETVAL], enter);
 
-	if(context[CTX_SYSCALL_ID] == __NR_rt_sigreturn)
+	if(syscall_nr == __NR_rt_sigreturn)
 	{
 		DEBUG("rt_sigreturn, faking exit event\n");
 		on_syscall(context, false);
 	}
-	else if(context[CTX_SYSCALL_ID] == __NR_execve && context[CTX_RETVAL] == 0)
+	else if(syscall_nr == __NR_execve && context[CTX_RETVAL] == 0)
 	{
 		DEBUG("ignoring execve return, will capture PTRACE_EVENT_EXEC\n");
 	}
-	else if((int64_t)context[CTX_SYSCALL_ID] >= 0)
+	else if((int64_t)syscall_nr >= 0)
 	{
 		// rt_sigreturn yields two events, the other one with orig_rax == -1, ignore it
 		on_syscall(context, enter);
 
-		if(context[CTX_SYSCALL_ID] == __NR_clone && enter)
-		{
-			DEBUG("SYSCALL tid %d clone(%08lx)\n", pid, context[CTX_ARG0]);
-			pctx.clone_flags = context[CTX_ARG0];
+		if(enter) {
+			switch(syscall_nr) {
+			case __NR_clone:
+			case __NR_fork:
+			case __NR_vfork:
+				DEBUG("SYSCALL tid %d clone syscall %d flags=%08lx\n", pid, syscall_nr, context[CTX_ARG0]);
+				pctx.clone_syscall = syscall_nr;
+				pctx.clone_flags = context[CTX_ARG0];
+				// TODO: clone3() will need a dedicated memory region copy_from_user()'d here instead
+			}
 		}
 	}
 }
@@ -195,13 +207,12 @@ static bool handle_ptrace_clone_event(pid_t tid, pdig_process_context& pctx, pdi
 		{
 			process_state::waiting_for_enter,
 			pctx.use_seccomp,
-			pctx.clone_flags,
 			new_tgid,
 		}
 	});
 
 	uint64_t context[CTX_SIZE] = {0};
-	context[CTX_SYSCALL_ID] = __NR_clone;
+	context[CTX_SYSCALL_ID] = pctx.clone_syscall;
 	context[CTX_RETVAL] = 0;
 	context[CTX_ARG0] = pctx.clone_flags;
 	context[CTX_PID_TID] = ((uint64_t)new_tgid) << 32 | child_tid;
@@ -212,7 +223,6 @@ static bool handle_ptrace_clone_event(pid_t tid, pdig_process_context& pctx, pdi
 		// the process was already there, which means it's stopped
 		// we need to fix up its state and wake it up
 		it.first->second.use_seccomp = pctx.use_seccomp;
-		it.first->second.clone_flags = pctx.clone_flags; // probably not needed
 		it.first->second.pid = new_tgid;
 		handle_spawning(child_tid, it.first->second);
 	}
@@ -231,7 +241,6 @@ static bool handle_early_sigstop(pid_t tid, pdig_context& main_ctx)
 			process_state::waiting_for_clone_event,
 			false,
 			0,
-			0,
 		}
 	});
 	// keep it paused until we receive the clone event
@@ -241,7 +250,7 @@ static bool handle_early_sigstop(pid_t tid, pdig_context& main_ctx)
 static bool handle_spawning(pid_t tid, pdig_process_context& pctx)
 {
 	EXPECT(ptrace(PTRACE_SETOPTIONS, tid, 0, ptrace_options(pctx.use_seccomp)));
-	DEBUG("hello tid %d (pid %d, pctx.clone_flags = %08lx)\n", tid, pctx.pid, pctx.clone_flags);
+	DEBUG("hello tid %d (pid %d)\n", tid, pctx.pid);
 	return wait_for_next_syscall(tid, pctx);
 }
 
@@ -440,7 +449,6 @@ static int spawn(int argc, char** argv, pdig_context& main_ctx)
 		{
 			process_state::spawning,
 			use_seccomp,
-			0,
 			pid,
 		}
 	});
@@ -459,7 +467,6 @@ static int attach(pid_t tid, pdig_context& main_ctx)
 		{
 			process_state::attaching,
 			use_seccomp,
-			0,
 			0, // will inject getpid() to get the tgid
 		}
 	});
