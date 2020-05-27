@@ -43,19 +43,21 @@ enum class process_state {
 
 
 struct pdig_process_context {
-	pdig_process_context(process_state state_, bool use_seccomp_, uint64_t parent_clone_flags_):
+	pdig_process_context(process_state state_, bool use_seccomp_, uint64_t clone_flags_):
 		state(state_),
 		pid(0),
-		clone_flags(0),
-		parent_clone_flags(parent_clone_flags_),
+		clone_flags(clone_flags_),
 		use_seccomp(use_seccomp_)
 	{}
 
 	process_state state;
 	pid_t pid; // we know the tid but need to store the pid somewhere
 
-	uint64_t clone_flags; // clone() flags this thread was created with
-	uint64_t parent_clone_flags; // clone() flags when this thread is a parent
+	// This is sort of subtle: when a thread is created, clone_flags contain
+	// the flags to clone() that this thread was created with
+	// but after the thread calls clone() itself, the flags get overwritten
+	// so that we can use them to know what to set in the child's clone_flags
+	uint64_t clone_flags;
 
 	bool use_seccomp;
 };
@@ -146,7 +148,7 @@ void handle_syscall(pid_t pid, pdig_process_context& pctx, bool enter)
 		if(context[CTX_SYSCALL_ID] == __NR_clone && enter)
 		{
 			DEBUG("SYSCALL tid %d clone(%08lx)\n", pid, context[CTX_ARG0]);
-			pctx.parent_clone_flags = context[CTX_ARG0];
+			pctx.clone_flags = context[CTX_ARG0];
 		}
 	}
 }
@@ -176,13 +178,13 @@ static bool handle_ptrace_clone_event(pid_t tid, pdig_process_context& pctx, pdi
 		return wait_for_next_syscall(tid, pctx);
 	}
 
-	DEBUG("CLONE tid %d cloned to %lu with flags %08lx\n", tid, child_tid, pctx.parent_clone_flags);
+	DEBUG("CLONE tid %d cloned to %lu with flags %08lx\n", tid, child_tid, pctx.clone_flags);
 	main_ctx.procs.insert({
 		child_tid,
 		{
 			process_state::spawning,
 			pctx.use_seccomp,
-			pctx.parent_clone_flags
+			pctx.clone_flags
 		}
 	});
 
@@ -194,7 +196,7 @@ static bool handle_spawning(pid_t tid, pdig_process_context& pctx)
 	EXPECT(ptrace(PTRACE_SETOPTIONS, tid, 0, ptrace_options(pctx.use_seccomp)));
 	pctx.pid = inject_getpid(tid);
 
-	DEBUG("hello tid %d (pid %d)\n", tid, pctx.pid);
+	DEBUG("hello tid %d (pid %d, pctx.clone_flags = %08lx)\n", tid, pctx.pid, pctx.clone_flags);
 	if(pctx.clone_flags) {
 		uint64_t context[CTX_SIZE] = {0};
 		context[CTX_SYSCALL_ID] = __NR_clone;
