@@ -730,7 +730,11 @@ int udig_finish_clone_fill(struct event_filler_arguments *args, scap_threadinfo*
 	//
 	// flags
 	//
-	syscall_get_arguments_deprecated(current, args->regs, 0, 1, &val);
+	if(args->event_type == PPME_SYSCALL_CLONE_20_E) {
+		syscall_get_arguments_deprecated(current, args->regs, 0, 1, &val);
+	} else {
+		val = 0;
+	}
 	res = val_to_ring(args, (uint64_t)clone_flags_to_scap(val), 0, false, 0);
 	if (unlikely(res != PPM_SUCCESS))
 		return res;
