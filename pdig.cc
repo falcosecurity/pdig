@@ -22,58 +22,14 @@
 #include <syscall.h>
 
 #include <atomic>
-#include <unordered_map>
 
 #include "pdig_api.h"
 #include "pdig_debug.h"
 #include "pdig_ptrace.h"
+#include "pdig_proc.h"
 #include "pdig_seccomp.h"
+#include "proc_tree.h"
 
-
-enum class process_state {
-	waiting_for_clone_event,
-	spawning,
-
-	attaching,
-	attaching_first_syscall_enter,
-	attaching_first_syscall_exit,
-
-	waiting_for_enter,
-	waiting_for_exit,
-};
-
-
-struct pdig_process_context {
-	pdig_process_context(process_state state_, bool use_seccomp_, pid_t pid_):
-		state(state_),
-		pid(pid_),
-		clone_syscall(0),
-		clone_flags(0),
-		use_seccomp(use_seccomp_)
-	{}
-
-	process_state state;
-	pid_t pid; // we know the tid but need to store the pid somewhere
-
-	// after a thread calls clone()/fork()/vfork(), store the flags
-	// here so that we can reconstruct the event in the child
-	// after we receive the ptrace CLONE event
-	// TODO: clone3() needs a struct passed as a pointer so we'll want
-	//       to revisit it, either by storing this struct here,
-	//       or storing the complete scap event
-	unsigned long clone_syscall;
-	uint64_t clone_flags;
-
-	bool use_seccomp;
-};
-
-
-struct pdig_context {
-	pid_t mainpid;
-	int exitcode;
-	struct sock_fprog* seccomp_filter;
-	std::unordered_map<pid_t, pdig_process_context> procs;
-};
 
 static std::atomic<bool> die(false);
 
@@ -254,10 +210,16 @@ static bool handle_spawning(pid_t tid, pdig_process_context& pctx)
 	return wait_for_next_syscall(tid, pctx);
 }
 
-static bool handle_attaching(pid_t tid, pdig_process_context& pctx)
+static bool handle_attaching(pid_t tid, pdig_process_context& pctx, pdig_context& main_ctx)
 {
 	EXPECT(ptrace(PTRACE_SETOPTIONS, tid, 0, ptrace_options(pctx.use_seccomp)));
-	pctx.pid = inject_getpid(tid);
+	if(pctx.pid == 0) {
+		pctx.pid = inject_getpid(tid);
+		main_ctx.incomplete_mt_procs.emplace(pctx.pid, 10);
+	}
+
+	attach_all_threads(pctx.pid, main_ctx);
+
 	EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
 
 	if(!pctx.use_seccomp) {
@@ -350,7 +312,7 @@ static bool handle_signal(pid_t tid, int sig, pdig_context& main_ctx)
 			return handle_spawning(tid, pctx);
 
 		case process_state::attaching:
-			return handle_attaching(tid, pctx);
+			return handle_attaching(tid, pctx, main_ctx);
 
 		default:
 			return wait_for_next_syscall(tid, pctx);
@@ -378,7 +340,7 @@ static bool handle_signal(pid_t tid, int sig, pdig_context& main_ctx)
 		return handle_execve_exit(tid, pctx);
 	case SIGTRAP | (PTRACE_EVENT_EXIT << 8):
 		return handle_exit(tid, pctx);
-	case SIGTRAP | (PTRACE_EVENT_CLONE << 8): // is clone guaranteed to stay within the same tgid?
+	case SIGTRAP | (PTRACE_EVENT_CLONE << 8):
 	case SIGTRAP | (PTRACE_EVENT_VFORK << 8):
 	case SIGTRAP | (PTRACE_EVENT_FORK << 8):
 		return handle_ptrace_clone_event(tid, pctx, main_ctx);
@@ -444,30 +406,13 @@ static int spawn(int argc, char** argv, pdig_context& main_ctx)
 			abort();
 	}
 
+	main_ctx.mainpid = pid;
 	main_ctx.procs.insert({
 		pid,
 		{
 			process_state::spawning,
 			use_seccomp,
 			pid,
-		}
-	});
-
-	return 0;
-}
-
-static int attach(pid_t tid, pdig_context& main_ctx)
-{
-	bool use_seccomp = main_ctx.seccomp_filter != nullptr;
-
-	EXPECT(ptrace(PTRACE_ATTACH, tid, 0, 0));
-
-	main_ctx.procs.insert({
-		tid,
-		{
-			process_state::attaching,
-			use_seccomp,
-			0, // will inject getpid() to get the tgid
 		}
 	});
 
@@ -501,6 +446,7 @@ int main(int argc, char **argv)
 	pid_t pid = -1;
 	int exitcode = 0;
 	bool capture_all = false;
+	bool attach_proc_tree = false;
 	bool force_seccomp = false;
 	int op;
 	int long_index = 0;
@@ -510,17 +456,22 @@ int main(int argc, char **argv)
 	{
 		{"capture-all", no_argument, 0, 'a' },
 		{"pid", required_argument, 0, 'p' },
+		{"proc-tree", required_argument, 0, 'P' },
 		{"force-seccomp", no_argument, 0, 'S' },
 		{"help", no_argument, 0, 'h' }
 	};
 
-	while((op = getopt_long(argc, argv, "+ap:Sh", long_options, &long_index)) != -1) {
+	while((op = getopt_long(argc, argv, "+ap:P:Sh", long_options, &long_index)) != -1) {
 		switch(op) {
 			case 'a':
 				capture_all = true;
 				break;
 			case 'p':
 				pid = atoi(optarg);
+				break;
+			case 'P':
+				pid = atoi(optarg);
+				attach_proc_tree = true;
 				break;
 			case 'S':
 				force_seccomp = true;
@@ -543,11 +494,15 @@ int main(int argc, char **argv)
 
 	if(pid != -1)
 	{
-		EXPECT(attach(pid, main_ctx));
+		EXPECT(attach_thread(pid, 0, main_ctx));
 	}
 	else
 	{
 		EXPECT(spawn(argc - optind, argv + optind, main_ctx));
+	}
+
+	if(attach_proc_tree) {
+		main_ctx.full_proc_scans_remaining = 10;
 	}
 
 	EXPECT(pdig_init_shm());
@@ -563,6 +518,13 @@ int main(int argc, char **argv)
 			break;
 		}
 		EXPECT(pid);
+
+		// MASSIVE TODO: this must be time-based, not randomly dependent on syscall timing
+		find_threads_to_attach(main_ctx);
+		if(attach_proc_tree) {
+			find_procs_to_attach(main_ctx);
+		}
+
 		handle_waitpid(pid, status, main_ctx);
 	} while(!main_ctx.procs.empty());
 
