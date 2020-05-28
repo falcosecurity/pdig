@@ -26,6 +26,7 @@ add_executable(pdig
 	pdig_ptrace.c
 	pdig_ptrace_amd64.cc
 	pdig_seccomp.cc
+	proc_tree.cc
     udig_procs.c
     ${SYSDIG_DIR}/driver/dynamic_params_table.c
     ${SYSDIG_DIR}/driver/event_table.c
