@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TRY(v) do { \
+    int __ret = (v); \
+	if(__ret < 0) { \
+		fprintf(stderr, "%s failed at %s:%d with %d (errno %s)\n", #v, __FILE__, __LINE__, __ret, strerror(errno)); \
+	} \
+} while(0)
+
 #define EXPECT(v) do { \
     int __ret = (v); \
 	if(__ret < 0) { \
