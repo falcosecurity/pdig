@@ -508,7 +508,13 @@ int main(int argc, char **argv)
 	EXPECT(pdig_init_shm());
 	DEBUG("parent pid = %d\n", getpid());
 
+	main_ctx.need_more_scans = true;
+
 	do {
+		if(!schedule_next_proc_scan_if_needed(main_ctx)) {
+			continue;
+		}
+
 		int status;
 		DEBUG("parent calling waitpid()\n");
 		pid = waitpid(-1, &status, WUNTRACED);
@@ -518,13 +524,6 @@ int main(int argc, char **argv)
 			break;
 		}
 		EXPECT(pid);
-
-		// MASSIVE TODO: this must be time-based, not randomly dependent on syscall timing
-		find_threads_to_attach(main_ctx);
-		if(attach_proc_tree) {
-			find_procs_to_attach(main_ctx);
-		}
-
 		handle_waitpid(pid, status, main_ctx);
 	} while(!main_ctx.procs.empty());
 

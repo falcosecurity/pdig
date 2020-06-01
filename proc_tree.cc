@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string>
 #include <sys/ptrace.h>
+#include <sys/signal.h>
+#include <sys/time.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -92,7 +94,7 @@ static pid2pid_map build_process_tree()
 			if(ptid > 0) {
 				proc_tree.emplace(tgid, ptid);
 			} else {
-				WARN("Failed to get parent tgid of %d", tgid);
+				DEBUG("Failed to get parent tgid of %d\n", tgid);
 			}
 		}
 	}
@@ -165,7 +167,7 @@ bool attach_thread(pid_t tid, pid_t tgid, pdig_context& main_ctx)
 			main_ctx.incomplete_mt_procs.emplace(tgid, 10);
 		}
 
-		DEBUG("PTRACE_ATTACH(tid=%d)\n", tid);
+		DEBUG("PTRACE_ATTACH(tid=%d; use_seccomp=%d)\n", tid, use_seccomp);
 		TRY(ptrace(PTRACE_ATTACH, tid, 0, 0));
 		return true;
 	}
@@ -206,10 +208,16 @@ void attach_all_threads(pid_t tgid, pdig_context& main_ctx)
 	}
 }
 
-void find_threads_to_attach(pdig_context& main_ctx)
+// try to attach to remaining threads of (multithreaded) processes
+// that we've partially attached to
+// returns the number of new threads found
+static size_t find_threads_to_attach(pdig_context& main_ctx)
 {
+	size_t total_attached = 0;
+
 	for(auto it = main_ctx.incomplete_mt_procs.begin(); it != main_ctx.incomplete_mt_procs.end(); /**/) {
 		auto n_attached = _attach_all_threads(it->first, main_ctx);
+		total_attached += n_attached;
 		if(n_attached) {
 			if(--(it->second) == 0) {
 				WARN("Failed to attach to all threads of tgid %d, are you running a fork bomb?", it->first);
@@ -225,9 +233,14 @@ void find_threads_to_attach(pdig_context& main_ctx)
 
 		++it;
 	}
+
+	return total_attached;
 }
 
-size_t find_procs_to_attach(pdig_context& main_ctx)
+// scan /proc, looking for processes that are not attached but should be
+// (children of an attached process)
+// returns the number of new processes found
+static size_t find_procs_to_attach(pdig_context& main_ctx)
 {
 	size_t n_attached = 0;
 
@@ -251,4 +264,97 @@ size_t find_procs_to_attach(pdig_context& main_ctx)
 	}
 
 	return n_attached;
+}
+
+static constexpr const uint64_t NSEC_PER_SEC = 1000000000;
+
+// scan all threads and processes as needed
+// returns true if we want another scan scheduled
+bool scan_procs_and_threads(pdig_context& main_ctx)
+{
+	bool need_more_scans = false;
+
+	if(find_threads_to_attach(main_ctx) != 0) {
+		need_more_scans = true;
+	}
+
+	if(main_ctx.full_proc_scans_remaining) {
+		if(find_procs_to_attach(main_ctx) != 0) {
+			need_more_scans = true;
+		}
+	}
+
+#ifdef _DEBUG
+	uint64_t now = gettimeofday_ns();
+	DEBUG("time_ms = %lu.%09ld, scanned procs, need_more_scans = %d\n", now / NSEC_PER_SEC, now % NSEC_PER_SEC, need_more_scans);
+#endif
+
+	return need_more_scans;
+}
+
+static uint64_t gettimeofday_ns()
+{
+	struct timeval tv;
+	gettimeofday(&tv, nullptr);
+
+	return tv.tv_sec * NSEC_PER_SEC + tv.tv_usec * 1000;
+}
+
+static uint64_t time_of_next_scan(int scans_so_far, uint64_t last_scan, uint64_t now)
+{
+	uint64_t delay;
+
+	if (last_scan == 0) {
+		// scan immediately on startup
+		return now;
+	} else if (scans_so_far < 3) {
+		// then, schedule the next two scans quickly (50 ms) to handle the easy case
+		delay = NSEC_PER_SEC / 20;
+	} else {
+		// scan every 500 ms afterwards
+		delay = NSEC_PER_SEC / 2;
+	}
+	return last_scan + delay;
+}
+
+static struct timespec ns_to_timespec(uint64_t nsec)
+{
+	return {
+		(time_t)(nsec / NSEC_PER_SEC),
+		(long)(nsec % NSEC_PER_SEC),
+	};
+}
+
+bool schedule_next_proc_scan_if_needed(pdig_context& main_ctx)
+{
+	if(!main_ctx.need_more_scans) {
+		return true;
+	}
+
+	sigset_t sigs;
+	sigemptyset(&sigs);
+	sigaddset(&sigs, SIGCHLD);
+	sigaddset(&sigs, SIGINT);
+	sigaddset(&sigs, SIGTERM);
+
+
+	uint64_t now = gettimeofday_ns();
+	uint64_t next_scan_ns = time_of_next_scan(main_ctx.scans_so_far, main_ctx.last_scan_ns, now);
+	int ret;
+
+	DEBUG("last_scan_ns = %lu, next_scan_ns = %lu, now = %lu, delay_ns = %ld\n", main_ctx.last_scan_ns, next_scan_ns, now, next_scan_ns - now);
+	if(next_scan_ns < now) {
+		ret = -1;
+	} else {
+		struct timespec timeout = ns_to_timespec(next_scan_ns - now);
+		ret = sigtimedwait(&sigs, nullptr, &timeout);
+	}
+
+	if (ret != SIGCHLD) {
+		main_ctx.need_more_scans = scan_procs_and_threads(main_ctx);
+		main_ctx.last_scan_ns = now;
+		main_ctx.scans_so_far++;
+		return false;
+	}
+	return true;
 }
