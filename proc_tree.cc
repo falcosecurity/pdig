@@ -166,7 +166,7 @@ bool attach_thread(pid_t tid, pid_t tgid, pdig_context& main_ctx)
 		}
 
 		DEBUG("PTRACE_ATTACH(tid=%d)\n", tid);
-		EXPECT(ptrace(PTRACE_ATTACH, tid, 0, 0));
+		TRY(ptrace(PTRACE_ATTACH, tid, 0, 0));
 		return true;
 	}
 
@@ -241,8 +241,6 @@ size_t find_procs_to_attach(pdig_context& main_ctx)
 	const auto proc_tree = build_process_tree();
 	for(const auto& it : proc_tree) {
 		if(need_to_attach(it.first, proc_tree, main_ctx.procs)) {
-			// TODO what if the main thread has exited and tid != tgid?
-			// how does it look in /proc?
 			n_attached += attach_thread(it.first, it.first, main_ctx);
 		}
 	}
