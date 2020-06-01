@@ -157,7 +157,7 @@ void handle_syscall(pid_t pid, pdig_process_context& pctx, bool enter)
 			case __NR_clone:
 			case __NR_fork:
 			case __NR_vfork:
-				DEBUG("SYSCALL tid %d clone syscall %d flags=%08lx\n", pid, syscall_nr, context[CTX_ARG0]);
+				DEBUG("SYSCALL tid %d clone syscall %lu flags=%08lx\n", pid, syscall_nr, context[CTX_ARG0]);
 				pctx.clone_syscall = syscall_nr;
 				pctx.clone_flags = context[CTX_ARG0];
 				// TODO: clone3() will need a dedicated memory region copy_from_user()'d here instead
