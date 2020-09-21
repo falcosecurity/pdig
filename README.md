@@ -16,6 +16,14 @@ This means you cannot use the high-performance in-kernel tracing, but with pdig 
 
 #### Instructions
 
+You can either build pdig statically or dynamically linked.
+A dynamically linked pdig is more suitable for environments
+where you can control the available libraries.
+A statically linked pdig on the other hand is very useful if
+pdig needs to be used in environments where you can't
+make assumptions about the available libraries.
+
+##### Dynamically linked
     git clone https://github.com/falcosecurity/pdig
     git clone https://github.com/draios/sysdig
     cd pdig
@@ -25,6 +33,59 @@ This means you cannot use the high-performance in-kernel tracing, but with pdig 
     make
     # (optionally) sudo make install
 
+##### Statically linked (using musl)
+
+You can setup a musl toolchain yourself and then compile pdig
+using the `-DMUSL_OPTIMIZED_BUILD=True` CMake flag.
+However, a more convenient way is to do that using an alpine container.
+An alpine container can be easily updated by downloading a new one
+or doing `apk update`.
+
+If you want to go the Alpine way:
+
+
+```bash
+mkdir source
+cd source
+git clone https://github.com/falcosecurity/pdig
+git clone https://github.com/draios/sysdig
+docker run -v $PWD:/source -it alpine:3.12 sh
+```
+
+Now in the container
+
+```
+apk add g++ gcc cmake cmake make libtool elfutils-dev libelf-static linux-headers
+cd /source/pdig
+mkdir -p build
+cd build
+cmake -DMUSL_OPTIMIZED_BUILD=True ..
+make
+```
+
+You can now find the pdig binary in the source directory you created under `pdig/build/pdig`.
+
+A quick `ldd` on that one shows this:
+
+```
+ldd build/pdig
+  statically linked
+```
+
+If you don't want to go the Alpine way, you will need to grab a copy of [musl libc](https://www.musl-libc.org/),
+compile it and then create a [musl gcc wrapper](https://www.musl-libc.org/how.html).
+Once you have the wrapper you can compile pdig using the same instructions in this way:
+
+
+```bash
+git clone https://github.com/falcosecurity/pdig
+git clone https://github.com/draios/sysdig
+cd pdig
+mkdir -p build
+cd build
+cmake -DMUSL_OPTIMIZED_BUILD=True ..
+make
+```
 ## How to run it?
 
 Run `pdig` with the path (and arguments, if any) of the process you want to trace, similar to `strace(1)`, e.g.
