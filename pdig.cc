@@ -20,6 +20,7 @@
 #include <sys/uio.h>
 #include <limits.h>
 #include <syscall.h>
+#include <sched.h>
 
 #include <atomic>
 
