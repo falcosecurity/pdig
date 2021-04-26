@@ -25,7 +25,7 @@ make assumptions about the available libraries.
 
 ##### Dynamically linked
     git clone https://github.com/falcosecurity/pdig
-    git clone https://github.com/draios/sysdig
+    git clone https://github.com/falcosecurity/libs
     cd pdig
     mkdir -p build
     cd build
@@ -48,7 +48,7 @@ If you want to go the Alpine way:
 mkdir source
 cd source
 git clone https://github.com/falcosecurity/pdig
-git clone https://github.com/draios/sysdig
+git clone https://github.com/falcosecurity/libs
 docker run -v $PWD:/source -it alpine:3.12 sh
 ```
 
@@ -79,7 +79,7 @@ Once you have the wrapper you can compile pdig using the same instructions in th
 
 ```bash
 git clone https://github.com/falcosecurity/pdig
-git clone https://github.com/draios/sysdig
+git clone https://github.com/falcosecurity/libs
 cd pdig
 mkdir -p build
 cd build
