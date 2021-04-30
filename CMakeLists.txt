@@ -18,13 +18,13 @@ set(CMAKE_CXX_FLAGS_DEBUG "-Og -g -D_DEBUG -Wall ${MUSL_OPTIMIZED_BUILD_FLAGS}")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -Wall ${MUSL_OPTIMIZED_BUILD_FLAGS}")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -Wall ${MUSL_OPTIMIZED_BUILD_FLAGS}")
 
-if(NOT SYSDIG_LIB_DIR)
-	SET(SYSDIG_LIB_DIR ../libs)
+if(NOT FALCO_LIBS_DIR)
+	SET(FALCO_LIBS_DIR ../libs)
 endif()
 
 include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${SYSDIG_LIB_DIR}/driver)
-include_directories(${SYSDIG_LIB_DIR}/userspace/libscap)
+include_directories(${FALCO_LIBS_DIR}/driver)
+include_directories(${FALCO_LIBS_DIR}/userspace/libscap)
 
 add_executable(pdig
     pdig.cc
@@ -34,14 +34,14 @@ add_executable(pdig
 	pdig_seccomp.cc
 	proc_tree.cc
     udig_procs.c
-    ${SYSDIG_LIB_DIR}/driver/dynamic_params_table.c
-    ${SYSDIG_LIB_DIR}/driver/event_table.c
-    ${SYSDIG_LIB_DIR}/driver/flags_table.c
-    ${SYSDIG_LIB_DIR}/driver/ppm_events.c
-    ${SYSDIG_LIB_DIR}/driver/ppm_fillers.c
-    ${SYSDIG_LIB_DIR}/driver/fillers_table.c
-    ${SYSDIG_LIB_DIR}/driver/syscall_table.c
-    ${SYSDIG_LIB_DIR}/userspace/libscap/scap_udig.c
+    ${FALCO_LIBS_DIR}/driver/dynamic_params_table.c
+    ${FALCO_LIBS_DIR}/driver/event_table.c
+    ${FALCO_LIBS_DIR}/driver/flags_table.c
+    ${FALCO_LIBS_DIR}/driver/ppm_events.c
+    ${FALCO_LIBS_DIR}/driver/ppm_fillers.c
+    ${FALCO_LIBS_DIR}/driver/fillers_table.c
+    ${FALCO_LIBS_DIR}/driver/syscall_table.c
+    ${FALCO_LIBS_DIR}/userspace/libscap/scap_udig.c
 )
 
 target_link_libraries(pdig rt)
