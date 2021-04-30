@@ -1,6 +1,6 @@
 # pdig
 
-A standalone executable based on ptrace and sysdig libraries.
+A standalone executable based on ptrace and falcosecurity libraries.
 
 ## Why pdig?
 
@@ -24,14 +24,17 @@ pdig needs to be used in environments where you can't
 make assumptions about the available libraries.
 
 ##### Dynamically linked
-    git clone https://github.com/falcosecurity/pdig
-    git clone https://github.com/falcosecurity/libs
-    cd pdig
-    mkdir -p build
-    cd build
-    cmake ..
-    make
-    # (optionally) sudo make install
+
+```console
+git clone https://github.com/falcosecurity/pdig
+git clone https://github.com/falcosecurity/libs
+cd pdig
+mkdir -p build
+cd build
+cmake ..
+make
+# (optionally) sudo make install
+```
 
 ##### Statically linked (using musl)
 
@@ -44,7 +47,7 @@ or doing `apk update`.
 If you want to go the Alpine way:
 
 
-```bash
+```console
 mkdir source
 cd source
 git clone https://github.com/falcosecurity/pdig
@@ -54,7 +57,7 @@ docker run -v $PWD:/source -it alpine:3.12 sh
 
 Now in the container
 
-```
+```console
 apk add g++ gcc cmake cmake make libtool elfutils-dev libelf-static linux-headers
 cd /source/pdig
 mkdir -p build
@@ -67,7 +70,7 @@ You can now find the pdig binary in the source directory you created under `pdig
 
 A quick `ldd` on that one shows this:
 
-```
+```console
 ldd build/pdig
   statically linked
 ```
@@ -77,7 +80,7 @@ compile it and then create a [musl gcc wrapper](https://www.musl-libc.org/how.ht
 Once you have the wrapper you can compile pdig using the same instructions in this way:
 
 
-```bash
+```console
 git clone https://github.com/falcosecurity/pdig
 git clone https://github.com/falcosecurity/libs
 cd pdig
@@ -92,15 +95,15 @@ Run `pdig` with the path (and arguments, if any) of the process you want to trac
 
     pdig [-a] curl https://example.com/
 
-The `-a` option enables the full filter, which provides a richer set of instrumented system calls. You probably want to use this option with sysdig, but not with falco.
+The `-a` option enables the full filter, which provides a richer set of instrumented system calls. You probably don't want to use this option  with Falco for performance reasons.
 
 You can also attach to a running process with the `-p` option:
 
     pdig [-a] -p 1234
 
-To observe any effect, you will need e.g. falco or sysdig running in a separate process, with udig (userspace instrumentation) enabled. For example:
+To observe any effect, you will need e.g. Falco running in a separate process, with udig (userspace instrumentation) enabled. For example:
 
-    sysdig -u
+    falco -u
 
 ## How slow is this?
 
@@ -109,13 +112,13 @@ to limit the kinds of system calls we instrument.
 
 With the caveat that there are lies, damn lies and benchmarks, here are some results from OSBench, as compared to a run without instrumentation:
 
-	| Test    | Configuration      | Relative |
-	| ------- | ------------------ | -------- |
-	| osbench | Create Files       | 0.245    |
-	| osbench | Create Threads     | 0.495    |
-	| osbench | Launch Programs    | 0.255    |
-	| osbench | Create Processes   | 0.285    |
-	| osbench | Memory Allocations | 1.005    |
+ | Test    | Configuration      | Relative |
+ | ------- | ------------------ | -------- |
+ | osbench | Create Files       | 0.245    |
+ | osbench | Create Threads     | 0.495    |
+ | osbench | Launch Programs    | 0.255    |
+ | osbench | Create Processes   | 0.285    |
+ | osbench | Memory Allocations | 1.005    |
 
 i.e. the worst case for OSBench is roughly 1/4 the original performance for system call heavy workloads.
 
