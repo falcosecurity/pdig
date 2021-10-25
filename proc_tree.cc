@@ -268,6 +268,14 @@ static size_t find_procs_to_attach(pdig_context& main_ctx)
 
 static constexpr const uint64_t NSEC_PER_SEC = 1000000000;
 
+static uint64_t gettimeofday_ns()
+{
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+
+    return tv.tv_sec * NSEC_PER_SEC + tv.tv_usec * 1000;
+}
+
 // scan all threads and processes as needed
 // returns true if we want another scan scheduled
 bool scan_procs_and_threads(pdig_context& main_ctx)
@@ -290,14 +298,6 @@ bool scan_procs_and_threads(pdig_context& main_ctx)
 #endif
 
 	return need_more_scans;
-}
-
-static uint64_t gettimeofday_ns()
-{
-	struct timeval tv;
-	gettimeofday(&tv, nullptr);
-
-	return tv.tv_sec * NSEC_PER_SEC + tv.tv_usec * 1000;
 }
 
 static uint64_t time_of_next_scan(int scans_so_far, uint64_t last_scan, uint64_t now)
