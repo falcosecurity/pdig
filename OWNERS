@@ -2,7 +2,5 @@ approvers:
   - ldegio
   - gnosek
   - leodido
+emeritus_approvers:
   - fntlnz
-reviewers:
-  - ldegio
-  - gnosek
